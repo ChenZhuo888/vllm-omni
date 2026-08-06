@@ -261,6 +261,11 @@ _DIFFUSION_MODELS = {
         "pipeline_magi_human",
         "MagiHumanPipeline",
     ),
+    "Magi2Pipeline": (
+        "magi2",
+        "pipeline_magi2",
+        "Magi2Pipeline",
+    ),
     "OmniVoicePipeline": (
         "omnivoice",
         "pipeline_omnivoice",
@@ -333,6 +338,7 @@ _NO_CACHE_ACCELERATION = {
     # Pipelines that do not support cache acceleration (cache_dit / tea_cache).
     "NextStep11Pipeline",
     "AudioXPipeline",
+    "Magi2Pipeline",
 }
 
 
@@ -547,6 +553,7 @@ _DIFFUSION_POST_PROCESS_FUNCS = {
     "HunyuanImage3Pipeline": "get_hunyuan_image3_post_process_func",
     "LingBotVideoPipeline": "get_lingbot_video_post_process_func",
     "MagiHumanPipeline": "get_magi_human_post_process_func",
+    "Magi2Pipeline": "get_magi2_post_process_func",
     "OmniVoicePipeline": "get_omnivoice_post_process_func",
     "DreamIDOmniPipeline": "get_dreamid_omni_post_process_func",
     "SenseNovaU1Pipeline": "get_sensenova_u1_post_process_func",

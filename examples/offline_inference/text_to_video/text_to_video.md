@@ -13,6 +13,10 @@ A unified script for text-to-video generation. Supports multiple models with mod
 | `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v` | 720x1280 | 121 | 50 | 6.0 | FP8 + VAE tiling required |
 | `nvidia/Cosmos3-Nano` | 720x1280 | 189 | 35 | 6.0 | ~46 GiB (peak, 720p) |
 | `BestWishYsh/Helios-Base` / `Helios-Mid` / `Helios-Distilled` | 384x640 | 99 | 50 | 5.0 / 5.0 / 1.0 | — |
+| `sand-ai/MAGI-2-preview` | 512x896 | 125 | 100 | Model-fixed | Native 4/8-GPU Ulysses; TP=1 |
+
+MAGI-2 native Preview setup, topology, and request constraints are
+documented in the [`MAGI-2 Preview recipe`](../../../recipes/SandAI/MAGI-2-preview.md).
 
 ## Local CLI Usage
 
@@ -214,6 +218,9 @@ python text_to_video.py \
 - `--tensor-parallel-size`: tensor parallel size (effective for models that support TP, e.g. LTX2).
 - `--enable-cpu-offload`: enable CPU offloading for diffusion models.
 - `--enable-layerwise-offload`: enable layerwise offloading on DiT modules.
+- `--enable-distributed-layerwise-offload`: enable distributed layerwise offload.
+- `--dlo-use-allgather` / `--dlo-no-use-allgather`: use sharded AllGather reconstruction (the default) or stream rank-local weights without AllGather.
+- `--dlo-resident-layers`: keep this many leading main-DiT blocks device-resident during distributed layerwise offload (default: `0`).
 - `--frame-rate`: generation FPS for pipelines that require it (e.g., LTX2).
 - `--audio-sample-rate`: fallback audio sample rate when the pipeline returns audio.
 - `--quantization`: quantization method (such as `fp8` for FP8).

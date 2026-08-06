@@ -12,6 +12,8 @@ DIFFUSION_MODEL_INDEX_FILES = (
     "modular_model_index.json",
 )
 
+MAGI2_PREVIEW_MODEL_ID = "sand-ai/MAGI-2-preview"
+
 
 def get_diffusion_model_index(
     model_name: str,
@@ -44,6 +46,31 @@ def _looks_like_bagel(model_name: str) -> bool:
         return "BagelForConditionalGeneration" in architectures
     except Exception:
         return False
+
+
+def _looks_like_magi2(model_name: str) -> bool:
+    """Detect SandAI MAGI-2, whose repository has no root HF config.
+
+    The official Hub ID is accepted directly. Local copies must contain the
+    distinctive preview checkpoint index plus the native pipeline's auxiliary
+    model files; a name substring alone is intentionally insufficient.
+    """
+    normalized = str(model_name).strip().rstrip("/")
+    hub_prefix = "https://huggingface.co/"
+    if normalized.lower().startswith(hub_prefix):
+        normalized = normalized[len(hub_prefix) :]
+        normalized = normalized.split("/tree/", 1)[0]
+    if normalized.lower() == MAGI2_PREVIEW_MODEL_ID.lower():
+        return True
+    if not os.path.isdir(normalized):
+        return False
+    required = (
+        "preview/model.safetensors.index.json",
+        "text_encoder/config.json",
+        "vae/Wan2.2_VAE.pth",
+        "turbo_vae/checkpoint.ckpt",
+    )
+    return all(os.path.isfile(os.path.join(normalized, *relative.split("/"))) for relative in required)
 
 
 def _looks_like_dreamzero(model_name: str) -> bool:
@@ -80,6 +107,11 @@ def is_diffusion_model(model_name: str) -> bool:
     2. Check using vllm's get_hf_file_to_dict utility
     3. Try the standard diffusers approach (may fail due to import issues)
     """
+    # MAGI-2 is a non-Diffusers diffusion repository without model_index.json
+    # or root config.json, so recognize its exact Hub ID/local file signature.
+    if _looks_like_magi2(model_name):
+        return True
+
     # Strategy 1: Check local file system first (fastest, avoids import issues)
     if os.path.isdir(model_name):
         for filename in DIFFUSION_MODEL_INDEX_FILES:

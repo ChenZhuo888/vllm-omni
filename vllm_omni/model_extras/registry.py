@@ -44,6 +44,10 @@ from vllm_omni.model_extras.lingbot_video import (
     build_text_to_image_prompt as build_lingbot_text_to_image_prompt,
 )
 from vllm_omni.model_extras.ltx2 import LTX_EXTRA_BODY_PARAMS, LTX_EXTRA_OUTPUT_PARAMS
+from vllm_omni.model_extras.magi2 import (
+    MAGI2_EXTRA_BODY_PARAMS,
+    MAGI2_EXTRA_OUTPUT_PARAMS,
+)
 from vllm_omni.model_extras.magi_human import (
     MAGI_HUMAN_EXTRA_BODY_PARAMS,
     MAGI_HUMAN_EXTRA_OUTPUT_PARAMS,
@@ -218,6 +222,10 @@ _EXTRA_SPECS: dict[str, dict[str, Any]] = {
     "MagiHumanPipeline": {
         "extra_body_params": MAGI_HUMAN_EXTRA_BODY_PARAMS,
         "extra_output_params": MAGI_HUMAN_EXTRA_OUTPUT_PARAMS,
+    },
+    "Magi2Pipeline": {
+        "extra_body_params": MAGI2_EXTRA_BODY_PARAMS,
+        "extra_output_params": MAGI2_EXTRA_OUTPUT_PARAMS,
     },
     "HeliosPipeline": {
         "extra_body_params": HELIOS_EXTRA_BODY_PARAMS,

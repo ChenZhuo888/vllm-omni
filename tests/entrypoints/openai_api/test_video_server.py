@@ -530,6 +530,33 @@ def test_video_generation_bridges_request_fields(generation_request, expected_nu
         assert sampling.extra_args["duration"] == expected_duration
 
 
+def test_magi2_i2v_preserves_reference_geometry_for_model_preprocessing(test_client, mocker: MockerFixture):
+    image_bytes = _make_test_image_bytes((48, 32))
+    mocker.patch(
+        "vllm_omni.entrypoints.openai.serving_video._encode_video_bytes",
+        return_value=b"fake-video",
+    )
+    engine = test_client.app.state.openai_serving_video._engine_client
+    engine.model_class_name = "Magi2Pipeline"
+
+    response = test_client.post(
+        "/v1/videos",
+        data={
+            "prompt": "A bear playing with yarn.",
+            "width": "96",
+            "height": "64",
+        },
+        files={"input_reference": ("input.png", image_bytes, "image/png")},
+    )
+
+    assert response.status_code == 200
+    video_id = response.json()["id"]
+    _wait_for_status(test_client, video_id, VideoGenerationStatus.COMPLETED.value)
+    input_image = engine.captured_prompt["multi_modal_data"]["image"]
+    assert isinstance(input_image, Image.Image)
+    assert input_image.size == (48, 32)
+
+
 def test_i2v_video_generation_with_image_reference_form(test_client, mocker: MockerFixture):
     mocker.patch(
         "vllm_omni.entrypoints.openai.serving_video._encode_video_bytes",
@@ -1540,6 +1567,11 @@ def test_video_request_validation():
     assert req.quality is None
     assert req.generate_sound is False
     assert req.sound_duration is None
+    assert VideoGenerationRequest(prompt="test", fps=12.5).resolve_video_params().fps == 12.5
+    with pytest.raises(ValueError):
+        VideoGenerationRequest(prompt="test", fps=float("inf"))
+    with pytest.raises(ValueError):
+        VideoGenerationRequest(prompt="test", video_params={"fps": float("nan")})
     assert VideoGenerationRequest(prompt="test", generate_sound=True, sound_duration=1.5).generate_sound is True
     with pytest.raises(ValueError):
         VideoGenerationRequest(prompt="test", size="invalid")
@@ -1559,6 +1591,14 @@ def test_video_request_validation():
         VideoGenerationRequest(prompt="test", sound_duration=0)
     with pytest.raises(ValueError):
         VideoGenerationRequest(prompt="test", quality="medium")
+
+
+def test_non_finite_fps_returns_422(test_client):
+    response = test_client.post(
+        "/v1/videos/sync",
+        data={"prompt": "invalid fps", "seconds": "10", "fps": "inf"},
+    )
+    assert response.status_code == 422
 
 
 def test_list_videos_supports_order_after_and_limit(test_client, mocker: MockerFixture):
@@ -2060,6 +2100,17 @@ def test_sync_does_not_create_store_entry(test_client, mocker: MockerFixture):
     assert len(stored) == 0
 
 
+def test_model_reported_fractional_fps_is_preserved():
+    result = SimpleNamespace(multimodal_output={"fps": 12.5})
+    assert OmniOpenAIServingVideo._resolve_fps(result) == 12.5
+
+
+@pytest.mark.parametrize("fps", [float("inf"), float("-inf"), float("nan")])
+def test_model_reported_nonfinite_fps_is_ignored(fps):
+    result = SimpleNamespace(multimodal_output={"fps": fps})
+    assert OmniOpenAIServingVideo._resolve_fps(result) is None
+
+
 def test_sync_sampling_params_pass_through(test_client, mocker: MockerFixture):
     """Sampling parameters should propagate to the engine through the sync path."""
     _mock_encode_video_bytes(mocker)
@@ -2067,6 +2118,8 @@ def test_sync_sampling_params_pass_through(test_client, mocker: MockerFixture):
         "/v1/videos/sync",
         data={
             "prompt": "param pass",
+            "seconds": "10",
+            "fps": "12.5",
             "num_inference_steps": "30",
             "guidance_scale": "6.5",
             "seed": "42",
@@ -2080,6 +2133,10 @@ def test_sync_sampling_params_pass_through(test_client, mocker: MockerFixture):
     assert captured.guidance_scale == 6.5
     assert captured.seed == 42
     assert captured.quality == "high"
+    assert captured.num_frames == 125
+    assert captured.fps == 12.5
+    assert captured.frame_rate == 12.5
+    assert captured.extra_args["duration"] == 10.0
 
 
 def test_sync_frame_interpolation_params_pass_to_sampling_params(test_client, mocker: MockerFixture):

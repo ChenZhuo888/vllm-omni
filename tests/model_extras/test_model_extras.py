@@ -250,6 +250,23 @@ def test_cosmos3_extra_registry_declares_request_and_response_params(pipeline_na
 
 @pytest.mark.core_model
 @pytest.mark.cpu
+def test_magi2_extra_registry_is_preview_only() -> None:
+    assert get_extra_body_params("Magi2Pipeline") == frozenset(
+        {
+            "seconds",
+            "resolution",
+            "image_path",
+            "output_width",
+            "output_height",
+            "deterministic",
+        }
+    )
+    assert get_extra_output_params("Magi2Pipeline") == frozenset()
+    assert should_init_extra_args_for_non_diffusion_stages("Magi2Pipeline") is False
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
 def test_magi_human_extra_registry_declares_request_and_response_params() -> None:
     assert get_extra_body_params("MagiHumanPipeline") == frozenset(
         {

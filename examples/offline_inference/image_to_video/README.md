@@ -1,7 +1,7 @@
 # Image-To-Video
 
 This shared example generates videos from images with VACE, Wan2.2, LTX-2,
-HunyuanVideo-1.5, Cosmos3, and other compatible pipelines.
+HunyuanVideo-1.5, Cosmos3, MAGI-2, and other compatible pipelines.
 
 - `image_to_video.py`: command-line script for single video generation with advanced options.
 
@@ -27,6 +27,10 @@ This folder provides a unified CLI script for image-to-video generation using vL
 | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | 480 x 832 | 81 | 50 | 4.0 | Around 20–25 GiB BF16, smallest I2V model |
 | `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v` | 480 x 832 | 121 | 50 | 6.0 | Around 100 GiB at default settings; the example enables `--enable-cpu-offload` + VAE tiling/slicing to fit an 80 GiB card |
 | `Lightricks/LTX-2` | 512 x 768 | 121 | 40 | video 3.0 / audio 7.0 | Memory use depends on frame count and tensor parallelism |
+| `sand-ai/MAGI-2-preview` | 512 x 896 | 125 | 100 | Model-fixed | Native 4/8-GPU Ulysses; TP=1 |
+
+MAGI-2 native Preview setup, topology, and I2VA commands are documented in
+the [`MAGI-2 Preview recipe`](../../../recipes/SandAI/MAGI-2-preview.md).
 
 !!! info
     Peak VRAM: based on basic single-card usage, batch size = 1, without any acceleration/optimization features. Some model weights cannot fit into one card with 80 GiB VRAM, which may need to use CPU offloading.
@@ -145,6 +149,9 @@ python image_to_video.py \
 | `--vae-use-tiling` | flag | off | Enable VAE tiling for memory optimization |
 | `--enable-cpu-offload` | flag | off | Enable CPU offloading for diffusion models |
 | `--enable-layerwise-offload` | flag | off | Enable layerwise offloading on DiT modules |
+| `--enable-distributed-layerwise-offload` | flag | off | Enable distributed layerwise offload |
+| `--dlo-use-allgather` / `--dlo-no-use-allgather` | flag | on / off | Select sharded AllGather reconstruction (default) or rank-local streaming |
+| `--dlo-resident-layers` | int | `0` | Leading main-DiT blocks kept device-resident during distributed layerwise offload |
 | `--cfg-parallel-size` | int | `1` | Set to `2` to enable CFG Parallel |
 | `--tensor-parallel-size` | int | `1` | Tensor parallel size (effective for models that support TP, e.g. LTX2) |
 | `--ulysses-degree` | int | `1` | Ulysses sequence parallel degree |

@@ -64,6 +64,9 @@ EXCLUDED_MODELS = [
     "HunyuanVideo15ImageToVideoPipeline",
     "LingBotVideoPipeline",
     "MagiHumanPipeline",
+    # The 270+ GiB multimodal checkpoint needs 4/8-way native sequence/head
+    # parallel execution; covered by focused native contract and GPU tests.
+    "Magi2Pipeline",
     "OmniVoicePipeline",
     "OmniVoice",
     "Cosmos3OmniDiffusersPipeline",
