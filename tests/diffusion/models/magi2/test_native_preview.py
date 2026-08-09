@@ -201,7 +201,8 @@ def test_tiny_native_preview_matches_pinned_reference_golden() -> None:
 
     model = Magi2PreviewTransformer(_tiny_config(torch.bfloat16))
     with torch.no_grad():
-        for index, parameter in enumerate(model.parameters()):
+        trainable_parameters = (parameter for parameter in model.parameters() if parameter.requires_grad)
+        for index, parameter in enumerate(trainable_parameters):
             values = (torch.arange(parameter.numel(), dtype=torch.float32) % 17 - 8) * 0.002 + (index % 5 - 2) * 0.0001
             parameter.copy_(values.reshape(parameter.shape).to(parameter.dtype))
         moe = model.block.layers[0].mlp.moe_mlp

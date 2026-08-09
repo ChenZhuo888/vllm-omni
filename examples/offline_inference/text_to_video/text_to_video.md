@@ -13,10 +13,11 @@ A unified script for text-to-video generation. Supports multiple models with mod
 | `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v` | 720x1280 | 121 | 50 | 6.0 | FP8 + VAE tiling required |
 | `nvidia/Cosmos3-Nano` | 720x1280 | 189 | 35 | 6.0 | ~46 GiB (peak, 720p) |
 | `BestWishYsh/Helios-Base` / `Helios-Mid` / `Helios-Distilled` | 384x640 | 99 | 50 | 5.0 / 5.0 / 1.0 | — |
-| `sand-ai/MAGI-2-preview` | 512x896 | 125 | 100 | Model-fixed | Native 4/8-GPU Ulysses; TP=1 |
+| `sand-ai/MAGI-2-preview` | 512x896 | 125 | 100 | Model-fixed | Native four-GPU TP/SP; resident SP4 default; DLO available |
 
-MAGI-2 native Preview setup, topology, and request constraints are
-documented in the [`MAGI-2 Preview recipe`](../../../recipes/SandAI/MAGI-2-preview.md).
+MAGI-2 native Preview setup, four-GPU topology and DLO choices, request
+constraints, and eight-GPU validation status are documented in the
+[`MAGI-2 Preview recipe`](../../../recipes/SandAI/MAGI-2-preview.md).
 
 ## Local CLI Usage
 

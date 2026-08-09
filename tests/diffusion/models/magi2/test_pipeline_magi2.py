@@ -277,9 +277,13 @@ def _topology_config(**overrides):
     return config
 
 
-def test_native_topology_rejects_tensor_parallelism():
-    config = _topology_config(tensor_parallel_size=2)
-    with pytest.raises(ValueError, match="tensor_parallel_size=2"):
+def test_native_topology_accepts_qualified_tensor_parallelism():
+    _validate_native_topology(_topology_config(tensor_parallel_size=4))
+
+
+def test_native_topology_rejects_nondivisible_tensor_parallelism():
+    config = _topology_config(tensor_parallel_size=3)
+    with pytest.raises(ValueError, match="does not divide"):
         _validate_native_topology(config)
 
 
@@ -450,6 +454,10 @@ class _NoEagerMoveComponent(_Magi2StagedComponent):
 def _offload_pipeline(monkeypatch):
     stagers = [Mock() for _ in range(4)]
     stager_factory = Mock(side_effect=stagers)
+    monkeypatch.setattr(
+        "vllm_omni.platforms.current_omni_platform.Stream",
+        Mock(return_value=Mock()),
+    )
     monkeypatch.setattr(
         "vllm_omni.diffusion.models.magi2.pipeline_magi2.PinnedModuleStager",
         stager_factory,

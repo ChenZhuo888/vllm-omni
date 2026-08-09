@@ -425,14 +425,26 @@ class Magi2MultiHeadMoE(nn.Module):
             torch.empty(self.local_flatten_num_experts, self.d_expert, self.d_head, dtype=config.params_dtype)
         )
         self.router = nn.Module()
-        self.router.register_buffer("expert_bias", torch.zeros(self.local_flatten_num_experts, dtype=torch.float32))
-        self.router.register_buffer("expert_bias_ema", torch.zeros(self.local_flatten_num_experts, dtype=torch.float32))
-        if self.ep_pad_heads:
-            self.register_buffer(
-                "_ep_pad_zeros",
-                torch.zeros(1, self.ep_pad_heads, self.d_head, dtype=config.params_dtype),
-                persistent=False,
-            )
+        # Both tensors are released checkpoint entries.  Non-trainable
+        # Parameters let the DLO mmap path bind them on a meta-constructed
+        # model; persistent buffers are intentionally not mmap-loaded by the
+        # generic backend.
+        self.router.expert_bias = nn.Parameter(
+            torch.zeros(self.local_flatten_num_experts, dtype=torch.float32),
+            requires_grad=False,
+        )
+        self.router.expert_bias_ema = nn.Parameter(
+            torch.zeros(self.local_flatten_num_experts, dtype=torch.float32),
+            requires_grad=False,
+        )
+
+        for name in self._EP_SHARDED_PARAMETER_NAMES:
+            target: nn.Module | Magi2MultiHeadMoE = self
+            parts = name.split(".")
+            for part in parts[:-1]:
+                target = getattr(target, part)
+            parameter = getattr(target, parts[-1])
+            parameter.mmap_weight_transform = self.ep_slice
 
     def ep_slice(self, checkpoint_tensor: torch.Tensor) -> torch.Tensor:
         """Slice flattened ``(head,expert)`` checkpoint rows for this rank."""
@@ -460,7 +472,9 @@ class Magi2MultiHeadMoE(nn.Module):
     def _route(self, x_heads: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         gate = self.gate.view(self.local_num_heads, self.num_experts, self.d_head).float()
         logits = torch.einsum("shd,hed->hse", x_heads.float(), gate)
-        bias = self.router.expert_bias.view(self.local_num_heads, self.num_experts)
+        bias_source = (os.environ.get("MAGI2_ROUTER_BIAS_SOURCE") or "ema").strip().lower()
+        bias_tensor = self.router.expert_bias if bias_source == "main" else self.router.expert_bias_ema
+        bias = bias_tensor.view(self.local_num_heads, self.num_experts)
         probs, indices = compute_topk_probs_and_indices(
             logits,
             self.top_k,
@@ -487,9 +501,22 @@ class Magi2MultiHeadMoE(nn.Module):
         return torch_mh_moe_forward(x_heads, gather_ids, sorted_probs, offsets, self.W_gate, self.W_up, self.W_down)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.ep_group.world_size > 1 and self.ep_group.replicated_sequence:
+            # TP column-parallel ``split_linear`` already emits exactly this
+            # rank's contiguous MoE-head slice.  Compute it once and leave it
+            # sharded for the row-parallel ``merge_linear``; no token dispatch
+            # or head all-gather belongs on the true TP path.
+            local_hidden_size = self.local_num_heads * self.d_head
+            if x.shape[-1] != local_hidden_size:
+                raise ValueError(f"TP-local MAGI MoE input has width {x.shape[-1]}, expected {local_hidden_size}")
+            local = x.view(-1, self.local_num_heads, self.d_head)
+            output = self._local_forward(local) if self.has_real_moe_heads else torch.zeros_like(local)
+            return output.reshape(-1, local_hidden_size)
+
         x_heads = x.view(-1, self.num_heads, self.d_head)
         if self.ep_pad_heads:
-            x_heads = torch.cat((x_heads, self._ep_pad_zeros.expand(x_heads.shape[0], -1, -1)), dim=1)
+            padding = x_heads.new_zeros((x_heads.shape[0], self.ep_pad_heads, self.d_head))
+            x_heads = torch.cat((x_heads, padding), dim=1)
         sequence_split_sizes: list[int] | None = None
         if self.ep_group.world_size > 1:
             local_size = torch.tensor([x_heads.shape[0]], dtype=torch.int64, device=x_heads.device)

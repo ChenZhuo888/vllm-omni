@@ -8,10 +8,15 @@ This file is adapted from SandAI's Apache-2.0 MAGI-2 preview context- and
 expert-parallel primitives.  It has been modified to reuse vLLM-Omni's
 already-initialized sequence-parallel and expert-parallel process groups.
 
-MAGI-2 overlaps two parallel views of the same rank set:
+MAGI-2 supports two equivalent layouts for its two parallel views:
 
 * Ulysses context parallelism shards tokens and gathers attention heads.
 * Multi-head expert parallelism shards the *MoE head* axis, not experts.
+
+With SP-only deployment both views use the SP group.  With TP enabled,
+Ulysses keeps using SP while native column/row tensor parallelism and the MoE
+heads use TP.  This gives TP4 and TP2SP2 independent weight/head and token
+axes while preserving the released equations and checkpoint hierarchy.
 
 These helpers intentionally do not create or own process groups.
 """
@@ -33,6 +38,7 @@ class Magi2ParallelGroup:
     group: dist.ProcessGroup | None
     world_size: int
     rank: int
+    replicated_sequence: bool = False
 
 
 def _dist_group_info(group: dist.ProcessGroup | None) -> Magi2ParallelGroup:
@@ -68,30 +74,75 @@ def get_magi2_ulysses_group() -> Magi2ParallelGroup:
 
 
 def get_magi2_ep_group() -> Magi2ParallelGroup:
-    """Return the existing vLLM EP group used for MAGI's head parallelism.
+    """Return the process group used for MAGI's MoE-head parallelism.
 
-    vLLM-Omni creates this group when ``enable_expert_parallel`` is enabled.
-    For tiny tests and single-rank inference no group is required.  We do not
-    silently substitute an independently-created group because group ordering
-    must remain owned by the engine.
+    TP is the explicit MoE-head axis when it is larger than one.  Otherwise
+    the released SP-only layout overlaps head parallelism with Ulysses.  Both
+    groups are initialized and owned by vLLM-Omni; MAGI creates no ad-hoc
+    process groups.
     """
 
     if not dist.is_available() or not dist.is_initialized():
         return Magi2ParallelGroup(None, 1, 0)
     try:
-        from vllm.distributed.parallel_state import get_ep_group
+        from vllm.distributed.parallel_state import get_tp_group
 
-        coordinator = get_ep_group()
+        coordinator = get_tp_group()
     except (AssertionError, RuntimeError):
-        # The released topology has identical CP and head-EP rank sets.  Reuse
-        # the initialized Ulysses group when vLLM's conventional EP coordinator
-        # is intentionally not installed by a lightweight test harness.
+        return get_magi2_ulysses_group()
+    if coordinator.world_size <= 1:
         return get_magi2_ulysses_group()
     return Magi2ParallelGroup(
         group=coordinator.device_group,
         world_size=coordinator.world_size,
         rank=coordinator.rank_in_group,
+        replicated_sequence=True,
     )
+
+
+def get_magi2_tp_group() -> Magi2ParallelGroup:
+    """Return vLLM's tensor-parallel group without an SP fallback."""
+
+    if not dist.is_available() or not dist.is_initialized():
+        return Magi2ParallelGroup(None, 1, 0, replicated_sequence=True)
+    try:
+        from vllm.distributed.parallel_state import get_tp_group
+
+        coordinator = get_tp_group()
+    except (AssertionError, RuntimeError):
+        return Magi2ParallelGroup(None, 1, 0, replicated_sequence=True)
+    return Magi2ParallelGroup(
+        group=coordinator.device_group,
+        world_size=coordinator.world_size,
+        rank=coordinator.rank_in_group,
+        replicated_sequence=True,
+    )
+
+
+def get_magi2_replica_group(data_parallel_size: int) -> Magi2ParallelGroup:
+    """Return the complete TP x SP group for one data-parallel replica.
+
+    The pipeline uses this group for conditioning broadcasts and output-rank
+    ownership.  With DP=1 the diffusion world is exactly one TP x SP replica.
+    With DP>1, MAGI currently requires TP=1, so the existing SP group is the
+    complete per-replica group.  Topology validation enforces those premises.
+    """
+
+    if not dist.is_available() or not dist.is_initialized():
+        return Magi2ParallelGroup(None, 1, 0)
+    if data_parallel_size > 1:
+        try:
+            from vllm_omni.diffusion.distributed.parallel_state import get_sp_group
+
+            coordinator = get_sp_group()
+        except (AssertionError, RuntimeError):
+            return Magi2ParallelGroup(None, 1, 0)
+        return Magi2ParallelGroup(
+            group=coordinator.device_group,
+            world_size=coordinator.world_size,
+            rank=coordinator.rank_in_group,
+        )
+    return _dist_group_info(dist.group.WORLD)
 
 
 def balanced_split_sizes(length: int, world_size: int) -> list[int]:

@@ -115,7 +115,7 @@ own validation evidence is added. See the
 [MiniMax H3 recipe](https://recipes.vllm.ai/MiniMaxAI/MiniMax-H3) for
 per-architecture serving commands.
 
-<sup>2</sup> MAGI-2 Preview runs through the native vLLM-Omni pipeline. It uses
-tensor parallel size 1 and world-spanning Ulysses sequence parallelism on a
-qualified 4- or 8-GPU worker world. See the
+<sup>2</sup> MAGI-2 Preview runs through the native vLLM-Omni pipeline. The reference-aligned default is resident
+SP4; native TP4 and TP2SP2 plus DLO DP4, DP2SP2, and rank-local SP4 are supported on four GPUs. Compatible
+eight-worker configurations pass topology validation but were not locally exercised for this integration. See the
 [`MAGI-2 Preview recipe`](https://github.com/vllm-project/vllm-omni/tree/main/recipes/SandAI/MAGI-2-preview.md).

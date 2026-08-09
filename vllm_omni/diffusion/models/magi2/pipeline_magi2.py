@@ -56,7 +56,7 @@ from .configuration_magi2 import (
     MAGI2_GENERATION_CONFIG,
     MAGI2_PREVIEW_CONFIG,
 )
-from .parallel import get_magi2_ulysses_group
+from .parallel import get_magi2_replica_group
 from .preview_data_proxy import Magi2DataProxy
 from .sampler_magi2 import (
     CFGConfig,
@@ -196,8 +196,6 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
     unsupported: list[str] = []
     for name in (
         "pipeline_parallel_size",
-        "data_parallel_size",
-        "tensor_parallel_size",
         "ring_degree",
         "allgather_degree",
         "cfg_parallel_size",
@@ -217,24 +215,66 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
         unsupported.append("quantization")
     if od_config.cache_backend not in (None, "none"):
         unsupported.append(f"cache_backend={od_config.cache_backend}")
-    if od_config.enable_distributed_layerwise_offload and getattr(od_config, "dlo_use_allgather", True):
-        unsupported.append("DLO AllGather (use --dlo-no-use-allgather)")
     if unsupported:
         raise ValueError(
-            "MAGI-2 Preview uses overlapping Ulysses sequence parallelism and "
-            "MoE-head parallelism. Unsupported options: " + ", ".join(unsupported)
+            "MAGI-2 Preview uses Ulysses sequence parallelism and MoE-head "
+            "parallelism. Unsupported options: " + ", ".join(unsupported)
         )
 
+    dp_size = int(getattr(parallel, "data_parallel_size", 1) or 1)
+    tp_size = int(getattr(parallel, "tensor_parallel_size", 1) or 1)
     sp_size = int(getattr(parallel, "sequence_parallel_size", 1) or 1)
     ulysses = int(getattr(parallel, "ulysses_degree", 1) or 1)
     if sp_size != ulysses:
         raise ValueError(f"MAGI-2 requires sequence_parallel_size == ulysses_degree; got {sp_size} and {ulysses}.")
-    world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
-    if world_size != sp_size:
+
+    attention_shards = tp_size * sp_size
+    if MAGI2_PREVIEW_CONFIG.num_heads_q % attention_shards:
         raise ValueError(
-            "MAGI-2 requires its Ulysses group to span the worker world; got "
-            f"world_size={world_size}, sequence_parallel_size={sp_size}."
+            "MAGI-2 query heads must divide TP x SP; got "
+            f"{MAGI2_PREVIEW_CONFIG.num_heads_q} heads, TP={tp_size}, SP={sp_size}."
         )
+    if MAGI2_PREVIEW_CONFIG.num_heads_kv % attention_shards:
+        raise ValueError(
+            "MAGI-2 KV heads must divide TP x SP; got "
+            f"{MAGI2_PREVIEW_CONFIG.num_heads_kv} heads, TP={tp_size}, SP={sp_size}."
+        )
+    dense_intermediate = (
+        int(MAGI2_PREVIEW_CONFIG.hidden_size * MAGI2_PREVIEW_CONFIG.intermediate_factor * 2 / 3) // 128 * 128
+    )
+    tp_dimensions = {
+        "hidden_size": MAGI2_PREVIEW_CONFIG.hidden_size,
+        "dense_intermediate_size": dense_intermediate,
+        "MoE heads": MAGI2_PREVIEW_CONFIG.moe.num_heads,
+        "shared_expert_intermediate_size": MAGI2_PREVIEW_CONFIG.moe.shared_expert_intermediate_size,
+        "modality_shared_expert_intermediate_size": (MAGI2_PREVIEW_CONFIG.moe.modality_shared_expert_intermediate_size),
+    }
+    invalid_tp_dimensions = [name for name, size in tp_dimensions.items() if size % tp_size]
+    if invalid_tp_dimensions:
+        raise ValueError(f"MAGI-2 tensor_parallel_size={tp_size} does not divide: " + ", ".join(invalid_tp_dimensions))
+
+    configured_world_size = dp_size * tp_size * sp_size
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() != configured_world_size:
+        raise ValueError(
+            "MAGI-2 parallel dimensions do not cover the worker world; got "
+            f"world_size={dist.get_world_size()}, DP={dp_size}, TP={tp_size}, SP={sp_size}."
+        )
+
+    distributed_offload = bool(od_config.enable_distributed_layerwise_offload)
+    dlo_allgather = bool(getattr(od_config, "dlo_use_allgather", True))
+    if dp_size > 1 and not distributed_offload:
+        raise ValueError("MAGI-2 data parallelism currently requires distributed layerwise offload")
+    if dp_size > 1 and tp_size > 1:
+        raise ValueError("MAGI-2 DLO data-parallel replicas currently require tensor_parallel_size=1")
+    if distributed_offload and dlo_allgather:
+        if dp_size <= 1:
+            raise ValueError(
+                "MAGI-2 DLO AllGather requires data_parallel_size > 1. SP ranks "
+                "own different MoE-head shards; use --dlo-no-use-allgather for SP-only DLO."
+            )
+        if tp_size > 1:
+            raise ValueError("MAGI-2 DLO AllGather does not support tensor_parallel_size > 1")
+
     allow_unsupported = _env_flag(
         _config_value(
             od_config,
@@ -242,10 +282,11 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
             "MAGI2_ALLOW_UNSUPPORTED_TOPOLOGY",
         )
     )
-    if world_size not in {4, 8} and not allow_unsupported:
+    if configured_world_size not in {4, 8} and not allow_unsupported:
         raise ValueError(
-            "MAGI-2 Preview is qualified for 4- or 8-way overlapping "
-            f"sequence/head parallelism; got {world_size}. Set "
+            "MAGI-2 Preview is qualified for four or eight workers; got "
+            f"DP={dp_size}, TP={tp_size}, SP={sp_size} "
+            f"(world_size={configured_world_size}). Set "
             "MAGI2_ALLOW_UNSUPPORTED_TOPOLOGY=1 only for controlled bring-up."
         )
 
@@ -381,6 +422,10 @@ class Magi2Pipeline(
     audio_sample_rate: ClassVar[int] = MAGI2_AUDIO_SAMPLE_RATE
     dummy_run_num_frames: ClassVar[int] = 0
     _dit_modules: ClassVar[list[str]] = ["transformer"]
+    # DLO must consume the exact local snapshot already resolved (including a
+    # pinned revision) for the auxiliary components and regular weight loader.
+    _mmap_checkpoint_root_attr: ClassVar[str] = "checkpoint_root"
+    _mmap_checkpoint_subdir: ClassVar[str] = "preview"
     _encoder_modules: ClassVar[list[str]] = ["text_encoder"]
     _vae_modules: ClassVar[list[str]] = [
         "image_vae",
@@ -397,6 +442,14 @@ class Magi2Pipeline(
             }
         )
     )
+
+    @staticmethod
+    def _remap_ckpt_key(checkpoint_key: str) -> str | None:
+        """Map released Preview keys to the native pipeline namespace."""
+
+        if checkpoint_key.startswith(("block.", "pre_adapter.", "post_adapter.")):
+            return f"transformer.{checkpoint_key}"
+        return None
 
     def __init__(self, od_config: OmniDiffusionConfig, **kwargs: Any) -> None:
         del kwargs
@@ -423,7 +476,9 @@ class Magi2Pipeline(
             default=bool(getattr(od_config, "fa_deterministic", False)),
         )
         os.environ["MAGI2_DETERMINISTIC"] = str(int(self.deterministic))
-        self._parallel_group = get_magi2_ulysses_group()
+        self._parallel_group = get_magi2_replica_group(
+            int(getattr(od_config.parallel_config, "data_parallel_size", 1) or 1)
+        )
         self._is_output_rank = self._parallel_group.rank == 0
         self._offload_aux_after_use = True
         self._transformer_is_layerwise_offloaded = bool(
@@ -435,7 +490,17 @@ class Magi2Pipeline(
         from .modeling_magi2 import Magi2PreviewTransformer
 
         MAGI2_PREVIEW_CONFIG.validate()
-        self.transformer = Magi2PreviewTransformer(MAGI2_PREVIEW_CONFIG)
+        mmap_dlo = bool(
+            od_config.enable_distributed_layerwise_offload and getattr(od_config, "dlo_use_allgather", True)
+        )
+        if mmap_dlo:
+            # AllGather DLO binds checkpoint tensors as mmap views and copies
+            # only this rank's orthogonal DP shard.  Constructing the 212-GiB
+            # Preview transformer on CPU first would defeat that memory model.
+            with torch.device("meta"):
+                self.transformer = Magi2PreviewTransformer(MAGI2_PREVIEW_CONFIG)
+        else:
+            self.transformer = Magi2PreviewTransformer(MAGI2_PREVIEW_CONFIG)
         self.data_proxy = Magi2DataProxy()
         self.sampler = Magi2PreviewSampler(
             self.transformer,
@@ -512,6 +577,17 @@ class Magi2Pipeline(
                 fall_back_to_pt=False,
             )
         ]
+        self.setup_diffusion_pipeline_profiler(
+            profiler_targets=[
+                "_encode_prompts",
+                "_encode_reference_image",
+                "_pool_figure_token",
+                "sampler.sample",
+                "_decode_video",
+                "_decode_audio",
+            ],
+            enable_diffusion_pipeline_profiler=bool(getattr(od_config, "enable_diffusion_pipeline_profiler", False)),
+        )
 
     def load_weights(
         self,
@@ -543,11 +619,10 @@ class Magi2Pipeline(
     def _conditioning_memory_window(self):
         """Make room for the 27B text encoder on the output rank.
 
-        The 8-way Preview shard is about 44 GiB and the text encoder is about
-        52 GiB, so they cannot coexist on an 80 GiB Hopper.  Layerwise
-        offloading already keeps the DiT on the host; otherwise stage the
-        output rank's shard to CPU for the two prompt encodes and restore it
-        before any model collective begins.
+        The text encoder and a resident Preview shard may not fit together on
+        the qualified devices.  Layerwise offloading already keeps the DiT on
+        the host; otherwise stage the output rank's shard to CPU for the two
+        prompt encodes and restore it before any model collective begins.
         """
 
         stage_transformer = self._is_output_rank and not self._transformer_is_layerwise_offloaded
@@ -878,10 +953,18 @@ class Magi2Pipeline(
             video = _resize_video(video, int(output_width), int(output_height))
 
         peak_memory_mb = monitor.peak_bytes / 1024**2 if monitor is not None else 0.0
-        if has_cuda and dist.is_available() and dist.is_initialized():
+        if has_cuda and dist.is_available() and dist.is_initialized() and self._parallel_group.world_size > 1:
             peak = torch.tensor(peak_memory_mb, device=self.device_str)
-            dist.all_reduce(peak, op=dist.ReduceOp.MAX)
+            dist.all_reduce(
+                peak,
+                op=dist.ReduceOp.MAX,
+                group=self._parallel_group.group,
+            )
             peak_memory_mb = float(peak.item())
+
+        stage_durations = {"magi2_preview_e2e": elapsed}
+        if getattr(self, "enable_diffusion_pipeline_profiler", False):
+            stage_durations.update(self.stage_durations)
 
         return DiffusionOutput(
             output={
@@ -891,6 +974,6 @@ class Magi2Pipeline(
                     "audio": {"sample_rate": MAGI2_AUDIO_SAMPLE_RATE},
                 },
             },
-            stage_durations={"magi2_preview_e2e": elapsed},
+            stage_durations=stage_durations,
             peak_memory_mb=peak_memory_mb,
         )

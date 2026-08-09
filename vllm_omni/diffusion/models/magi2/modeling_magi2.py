@@ -52,10 +52,8 @@ class Magi2Attention(nn.Module):
         self.config = config
         self.num_modality = num_modality
         self.head_dim = config.head_dim
-        self.num_heads_q = config.num_heads_q
-        self.num_heads_kv = config.num_heads_kv
-        self.q_size = self.num_heads_q * self.head_dim
-        self.kv_size = self.num_heads_kv * self.head_dim
+        global_q_size = config.num_heads_q * self.head_dim
+        global_kv_size = config.num_heads_kv * self.head_dim
 
         self.pre_norm = MultiModalityRMSNorm(
             config.hidden_size,
@@ -63,26 +61,37 @@ class Magi2Attention(nn.Module):
         )
         self.linear_g = make_grouped_linear(
             config.hidden_size,
-            self.num_heads_q,
+            config.num_heads_q,
             num_experts=num_modality,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="column",
         )
         self.linear_qkv = make_grouped_linear(
             config.hidden_size,
-            self.q_size + 2 * self.kv_size,
+            global_q_size + 2 * global_kv_size,
             num_experts=num_modality,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="column",
+            qkv_splits=(global_q_size, global_kv_size, global_kv_size),
         )
         self.linear_proj = make_grouped_linear(
-            self.q_size,
+            global_q_size,
             config.hidden_size,
             num_experts=num_modality,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="row",
         )
+        self.tp_group = self.linear_qkv.tp_group
+        self.num_heads_q = config.num_heads_q // self.tp_group.world_size
+        self.num_heads_kv = config.num_heads_kv // self.tp_group.world_size
+        self.q_size = self.num_heads_q * self.head_dim
+        self.kv_size = self.num_heads_kv * self.head_dim
         self.sinks = nn.Parameter(torch.empty(config.attention_sink_tokens, self.num_heads_q, dtype=torch.float32))
+        if self.tp_group.world_size > 1:
+            self.sinks.checkpoint_weight_transform = self._shard_sinks
         self.q_norm = MultiModalityRMSNorm(
             self.head_dim,
             num_modality=num_modality,
@@ -93,6 +102,15 @@ class Magi2Attention(nn.Module):
             num_modality=num_modality,
             out_dtype=torch.float32,
         )
+
+    def _shard_sinks(self, checkpoint_tensor: torch.Tensor) -> torch.Tensor:
+        if tuple(checkpoint_tensor.shape) == tuple(self.sinks.shape):
+            return checkpoint_tensor
+        expected = (self.config.attention_sink_tokens, self.config.num_heads_q)
+        if tuple(checkpoint_tensor.shape) != expected:
+            raise ValueError(f"attention sinks have shape {tuple(checkpoint_tensor.shape)}, expected {expected}")
+        start = self.tp_group.rank * self.num_heads_q
+        return checkpoint_tensor[:, start : start + self.num_heads_q]
 
     def forward(
         self,
@@ -160,6 +178,7 @@ class Magi2MLP(nn.Module):
             num_experts=num_modality,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="column",
         )
         self.down_proj = make_grouped_linear(
             intermediate_size,
@@ -167,6 +186,7 @@ class Magi2MLP(nn.Module):
             num_experts=num_modality,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="row",
         )
 
     def forward(self, hidden_states: torch.Tensor, dispatcher: ModalityDispatcher) -> torch.Tensor:
@@ -187,6 +207,7 @@ class Magi2MultiHeadMoELayer(nn.Module):
             config.hidden_size,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="column",
         )
         self.moe_mlp = Magi2MultiHeadMoE(
             Magi2MultiHeadMoEConfig(
@@ -206,18 +227,21 @@ class Magi2MultiHeadMoELayer(nn.Module):
             config.hidden_size,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="row",
         )
         self.shared_expert_fc1 = make_grouped_linear(
             config.hidden_size,
             2 * moe.shared_expert_intermediate_size,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="column",
         )
         self.shared_expert_fc2 = make_grouped_linear(
             moe.shared_expert_intermediate_size,
             config.hidden_size,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="row",
         )
         self.modality_specific_shared_expert_fc1 = make_grouped_linear(
             config.hidden_size,
@@ -225,6 +249,7 @@ class Magi2MultiHeadMoELayer(nn.Module):
             num_experts=3,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="column",
         )
         self.modality_specific_shared_expert_fc2 = make_grouped_linear(
             moe.modality_shared_expert_intermediate_size,
@@ -232,7 +257,11 @@ class Magi2MultiHeadMoELayer(nn.Module):
             num_experts=3,
             bias=False,
             dtype=config.params_dtype,
+            parallel_mode="row",
         )
+        tp_size = self.split_linear.tp_group.world_size
+        self.local_shared_expert_intermediate_size = moe.shared_expert_intermediate_size // tp_size
+        self.local_modality_shared_expert_intermediate_size = moe.modality_shared_expert_intermediate_size // tp_size
 
     def _shared_experts(
         self,
@@ -244,8 +273,8 @@ class Magi2MultiHeadMoELayer(nn.Module):
         activated = swiglu7(torch.cat((shared, modality), dim=-1))
         shared, modality = activated.split(
             (
-                self.config.moe.shared_expert_intermediate_size,
-                self.config.moe.modality_shared_expert_intermediate_size,
+                self.local_shared_expert_intermediate_size,
+                self.local_modality_shared_expert_intermediate_size,
             ),
             dim=-1,
         )
@@ -612,12 +641,20 @@ class Magi2PreviewTransformer(nn.Module):
         module = dict(self.named_modules()).get(module_name)
         return module if isinstance(module, Magi2MultiHeadMoE) else None
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Strictly load and EP-slice the released preview checkpoint.
+    def validate_loaded_weights(self, loaded_names: set[str]) -> None:
+        """Fail closed when the mmap loader misses a Preview tensor."""
 
-        The generic pipeline loader currently yields whole safetensors.  This
-        method guarantees correctness and rank-local storage; a sliced iterator
-        can later avoid materializing the full expert tensor before this call.
+        expected = {f"transformer.{name}" for name, _ in self.named_parameters()}
+        missing = expected - loaded_names
+        if missing:
+            raise ValueError(f"MAGI-2 Preview mmap loading is missing {len(missing)} weights: {sorted(missing)[:8]}")
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Strictly load and TP/MoE-slice the released Preview checkpoint.
+
+        This is the ordinary loader used by resident and rank-local DLO
+        deployments.  DLO+AllGather uses the pipeline's mmap mapping and the
+        same per-parameter transforms before orthogonal DP sharding.
         """
 
         targets = self.state_dict(keep_vars=True)
@@ -626,10 +663,13 @@ class Magi2PreviewTransformer(nn.Module):
             name = raw_name.removeprefix("transformer.")
             if name not in targets:
                 raise ValueError(f"unexpected MAGI-2 preview checkpoint weight {raw_name!r}")
-            moe = self._moe_for_weight(name)
-            if moe is not None and name.endswith(self._EP_SHARDED_SUFFIXES):
-                checkpoint_tensor = moe.ep_slice(checkpoint_tensor)
             target = targets[name]
+            checkpoint_transform = getattr(target, "checkpoint_weight_transform", None)
+            moe = self._moe_for_weight(name)
+            if callable(checkpoint_transform):
+                checkpoint_tensor = checkpoint_transform(checkpoint_tensor)
+            elif moe is not None and name.endswith(self._EP_SHARDED_SUFFIXES):
+                checkpoint_tensor = moe.ep_slice(checkpoint_tensor)
             if tuple(target.shape) != tuple(checkpoint_tensor.shape):
                 raise ValueError(
                     f"MAGI-2 weight {name!r} has shape {tuple(checkpoint_tensor.shape)}, expected {tuple(target.shape)}"

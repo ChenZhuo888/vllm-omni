@@ -9,6 +9,7 @@
 - Task: Text-to-video-and-audio (T2VA) and image-to-video-and-audio (I2VA)
 - Mode: Offline shared examples and OpenAI-compatible video serving
 - Runtime: Native vLLM-Omni pipeline
+- Default deployment: Four-GPU resident SP4 (`TP=1`, `SP=4`)
 - Maintainer: Community
 
 ## When to use this recipe
@@ -52,28 +53,27 @@ hf download sand-ai/MAGI-2-preview \
 Install vLLM-Omni before running the examples. The native path uses
 vLLM-Omni's normal dependencies and does not require a second model runtime.
 
-## Hardware Support
+## Hardware support
 
-## GPU
+### GPU
 
-### Native 4-GPU profile
+#### Default four-GPU deployment: resident SP4
 
-MAGI-2 Preview uses tensor parallel size 1. Its Ulysses sequence-parallel group
-must span the complete worker world, so a four-GPU run uses
-`--tensor-parallel-size 1 --ulysses-degree 4`.
+The recommended default is resident sequence parallelism across all four
+workers: `--tensor-parallel-size 1 --ulysses-degree 4`. This SP4 layout is the
+reference-aligned fidelity baseline. DLO is disabled, and every worker keeps
+its rank-local Preview transformer shard device-resident during denoising.
 
-The default recipe does not enable DLO. Each worker keeps its rank-local
-Preview shard device-resident for denoising, while the output worker stages the
-text encoder and codec components from pinned CPU memory only for the phase
-that needs them. The output worker temporarily makes room for prompt encoding
-when required by the device capacity.
+The output worker stages the text encoder and codec components from pinned CPU
+memory only for the phase that needs them. It temporarily makes room for prompt
+encoding when required by the device capacity.
 
 #### Environment
 
 - Platform: NVIDIA CUDA
 - Workers: 4
-- Tensor parallel size: 1
-- Ulysses degree / sequence parallel size: 4
+- Default tensor parallel size: 1
+- Default Ulysses degree / sequence parallel size: 4
 - Dtype: BF16
 
 Set `MAGI2_DETERMINISTIC=1` before worker startup when deterministic kernels are
@@ -144,30 +144,44 @@ ffprobe -v error \
 The output should contain 125 video frames at 896x512 and 12.5 fps, plus stereo
 44.1 kHz audio.
 
-### Native 8-GPU profile
+#### Other native four-GPU resident layouts
 
-The native eight-GPU topology keeps tensor parallel size at 1 and expands
-Ulysses to the full eight-worker world. Select all eight devices:
+The native transformer also supports tensor parallelism. All three resident
+layouts below were exercised end to end on four NVIDIA L20X GPUs:
 
-```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-```
+| Layout | Shared-example flags | Distribution |
+|---|---|---|
+| SP4 (default) | `--tensor-parallel-size 1 --ulysses-degree 4` | Ulysses token/head partition plus rank-local MoE-head shards |
+| TP2SP2 | `--tensor-parallel-size 2 --ulysses-degree 2` | Native TP matrix shards and row reductions inside each two-rank TP group, plus two-way Ulysses |
+| TP4 | `--tensor-parallel-size 4 --ulysses-degree 1` | Native four-way TP matrix shards and row reductions |
 
-Then add `--tensor-parallel-size 1 --ulysses-degree 8` to either shared offline
-command. For online serving, set `--num-gpus 8 --tensor-parallel-size 1
---ulysses-degree 8`.
+Use the same shared T2VA or I2VA command and replace only the two parallelism
+flags. The pipeline requires `TP x SP = 4` for a resident four-worker run and
+validates attention-head, MoE-head, hidden-size, and intermediate-size
+divisibility. The TP and SP layouts are deterministic within a fixed topology,
+but BF16 collective order can produce topology-dependent numeric differences;
+use SP4 when fidelity against the reference-aligned baseline is the priority.
 
-Do not set tensor parallel size to the GPU count. MAGI-2 overlaps its native
-MoE-head partitioning with world-spanning Ulysses sequence parallelism.
+#### Distributed layerwise offload
 
-### Distributed layerwise offload status
+Distributed layerwise offload (DLO) streams the 40 Preview transformer blocks
+from host memory. The following four-GPU layouts were exercised end to end:
 
-MAGI-2 Preview supports distributed layerwise offload only in rank-local,
-no-AllGather mode. Its MoE heads are already partitioned across the same worker
-group as Ulysses, so the workers do not hold interchangeable data-parallel
-shards for DLO to reconstruct with AllGather.
+| Layout | Parallelism and DLO flags | AllGather | Concurrent requests |
+|---|---|:---:|:---:|
+| DP4 | `--data-parallel-size 4 --tensor-parallel-size 1 --ulysses-degree 1 --enable-distributed-layerwise-offload --dlo-resident-layers 0` | Yes (default) | 4 |
+| DP2SP2 | `--data-parallel-size 2 --tensor-parallel-size 1 --ulysses-degree 2 --enable-distributed-layerwise-offload --dlo-resident-layers 0` | Yes (default) | 2 |
+| SP4 | `--tensor-parallel-size 1 --ulysses-degree 4 --enable-distributed-layerwise-offload --dlo-no-use-allgather --dlo-resident-layers 0` | No, rank-local | 1 |
 
-Add these flags to either shared offline command:
+For DP4 and DP2SP2, DLO first applies the native local weight transform (such
+as the SP-local MoE-head slice), then stores an orthogonal DP shard and
+reconstructs the transformed tensor with AllGather for each block. All DP
+ranks must therefore advance together. Send exactly `data_parallel_size`
+concurrent requests with the same explicit `num_inference_steps` value.
+
+SP4 ranks own different MoE-head shards, so SP-only DLO must use rank-local
+streaming with `--dlo-no-use-allgather`. Add these flags to either shared
+offline command to use that profile:
 
 ```text
 --enable-distributed-layerwise-offload \
@@ -175,13 +189,29 @@ Add these flags to either shared offline command:
 --dlo-resident-layers 0
 ```
 
-The path was exercised end to end on four NVIDIA L20X GPUs at 272p with all 40
-transformer blocks streamed. Its deterministic decoded video and audio matched
-the non-DLO run exactly. AllGather DLO is rejected during pipeline validation.
+The deterministic decoded video and audio from the SP4 DLO profile matched the
+resident SP4 run exactly. The shared offline entrypoints expose TP, SP, and DLO
+options, but not DP request-wave configuration; use online serving for the DP4
+and DP2SP2 AllGather profiles.
+
+DLO with AllGather does not support tensor parallelism. Data parallelism is
+supported only with DLO, and SP-only DLO with AllGather is rejected during
+pipeline validation.
+
+#### Eight-GPU configuration status
+
+The topology validator also accepts compatible eight-worker factorizations.
+Examples include resident SP8, TP2SP4, and TP4SP2; DLO DP8, DP4SP2, and DP2SP4
+use AllGather, while SP8 uses rank-local no-AllGather streaming. These profiles
+must still satisfy the same dimension checks and DLO restrictions above.
+
+Only the four-GPU layouts were exercised locally for this integration. Treat
+the eight-GPU profiles as supported configuration validation, not as local
+runtime qualification.
 
 ## Online serving
 
-This four-worker example uses the same native topology as the offline commands:
+This four-worker example uses the default resident SP4 topology:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3
@@ -209,6 +239,14 @@ curl -X POST http://localhost:8091/v1/videos/sync \
 
 For I2VA, add `-F 'input_reference=@first_frame.png;type=image/png'`.
 
+To serve DLO DP4, replace the default parallelism flags with
+`--data-parallel-size 4 --tensor-parallel-size 1 --ulysses-degree 1` and add
+`--enable-distributed-layerwise-offload --dlo-resident-layers 0`. For DLO
+DP2SP2, use `--data-parallel-size 2`, `--tensor-parallel-size 1`, and
+`--ulysses-degree 2` with the same DLO flags. Submit four or two concurrent
+requests, respectively, and keep `num_inference_steps` identical across the
+request wave.
+
 ## MAGI-2 request fields
 
 Common geometry and sampling values use the shared CLI flags. The native
@@ -226,13 +264,17 @@ Use `--image` in the shared I2V entrypoint rather than the lower-level
 
 ## Known limitations
 
-- Exactly one request/output is supported at a time.
+- Each replica processes one request at a time. DLO DP4 and DP2SP2 can process
+  four and two matched requests concurrently across replicas; fused per-rank
+  request batching is not supported.
 - Only the published 10-second, 125-frame, 12.5-fps Preview workflow is supported.
 - Native generation is limited to the `272p` and `540p` tiers.
-- The worker world must contain 4 or 8 GPUs, with tensor parallel size 1 and
-  Ulysses degree equal to world size.
+- The worker world must contain 4 or 8 GPUs. Parallel dimensions must cover the
+  full worker world and pass the model-dimension divisibility checks.
+- Data parallelism requires DLO. DLO data-parallel replicas require TP=1, and
+  DLO AllGather requires DP greater than 1.
 - HSDP, cache acceleration, quantization, generic module CPU offload, CFG
   parallelism, ring sequence parallelism, pipeline parallelism, and VAE patch
   parallelism are not supported for this pipeline.
-- Distributed layerwise offload requires `--dlo-no-use-allgather`; the
-  AllGather mode is incompatible with MAGI-2's rank-local MoE-head shards.
+- SP-only DLO requires `--dlo-no-use-allgather`; SP ranks own different
+  MoE-head shards and cannot form a DLO AllGather group with one another.
