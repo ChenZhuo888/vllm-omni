@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import chain
-from typing import Any, Literal
+from typing import Literal
 
 import torch
 from einops import rearrange
@@ -528,15 +528,7 @@ class Magi2DataProxy:
         self.config = config or Magi2PreviewDataProxyConfig()
         self.patch_size = self.config.patch_size
         self.t_patch_size = self.config.t_patch_size
-        self._saved_data: dict[str, Any] = {}
-
-    def saved_for_output(self, **kwargs: Any) -> None:
-        self._saved_data.update(kwargs)
-
-    def get_saved_data(self, key: str) -> Any:
-        if key not in self._saved_data:
-            raise RuntimeError("process_input must be called before process_output")
-        return self._saved_data[key]
+        self._packed_for_output: SimplePackedData | None = None
 
     def img2tokens(self, x_t: torch.Tensor) -> torch.Tensor:
         return _patchify_3d(x_t, self.t_patch_size, self.patch_size)
@@ -576,7 +568,7 @@ class Magi2DataProxy:
         data: ModelInput,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, VarlenHandler, torch.Tensor]:
         self._validate_batch(data)
-        batch_size, input_video_channel, video_t, video_h, video_w = data.x_t.shape
+        batch_size, _, video_t, video_h, video_w = data.x_t.shape
         video_tokens = self.img2tokens(data.x_t)
         audio_tokens = data.audio_x_t.contiguous()
         text_tokens = data.txt_feat.contiguous()
@@ -646,10 +638,7 @@ class Magi2DataProxy:
             max_seqlen_q=packed.max_seqlen,
             max_seqlen_k=packed.max_seqlen,
         )
-        self.saved_for_output(
-            simple_packed_data=packed,
-            input_video_channel=input_video_channel,
-        )
+        self._packed_for_output = packed
         return (
             packed.token_sequence,
             packed.coords_mapping,
@@ -659,8 +648,9 @@ class Magi2DataProxy:
         )
 
     def process_output(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        packed: SimplePackedData = self.get_saved_data("simple_packed_data")
-        return packed.depack_token_sequence(x)
+        if self._packed_for_output is None:
+            raise RuntimeError("process_input must be called before process_output")
+        return self._packed_for_output.depack_token_sequence(x)
 
 
 __all__ = [

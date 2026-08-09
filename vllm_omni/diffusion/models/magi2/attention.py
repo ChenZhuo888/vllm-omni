@@ -16,6 +16,9 @@ import os
 from dataclasses import dataclass
 
 import torch
+import torch.nn as nn
+
+from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 
 from .parallel import (
     Magi2ParallelGroup,
@@ -258,8 +261,45 @@ def ulysses_packed_attention_with_sink(
     return output
 
 
+class Magi2PackedAttentionKernel(nn.Module):
+    """Model kernel plugged into the shared diffusion Attention contract."""
+
+    def __init__(self, softcap: float) -> None:
+        super().__init__()
+        self.softcap = softcap
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AttentionMetadata | None = None,
+    ) -> torch.Tensor:
+        if attn_metadata is None:
+            raise ValueError("MAGI-2 packed attention requires attention metadata")
+        varlen = attn_metadata.extra.get("magi2_varlen")
+        split_sizes = attn_metadata.extra.get("magi2_split_sizes")
+        sink = attn_metadata.extra.get("magi2_sink")
+        if not isinstance(varlen, VarlenHandler):
+            raise TypeError("magi2_varlen must be a VarlenHandler")
+        if not isinstance(split_sizes, (list, torch.Tensor)):
+            raise TypeError("magi2_split_sizes must be a list or tensor")
+        if sink is not None and not isinstance(sink, torch.Tensor):
+            raise TypeError("magi2_sink must be a tensor or None")
+        return ulysses_packed_attention_with_sink(
+            query,
+            key,
+            value,
+            varlen,
+            split_sizes,
+            softcap=self.softcap,
+            sink=sink,
+        )
+
+
 __all__ = [
     "VarlenHandler",
+    "Magi2PackedAttentionKernel",
     "apply_rotary_emb",
     "correct_out_lse_with_sink",
     "packed_attention_with_sink",

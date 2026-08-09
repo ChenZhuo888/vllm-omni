@@ -6,6 +6,7 @@
 from vllm_omni.diffusion.cache.cachedit.backend import (
     CUSTOM_DIT_ENABLERS,
     CacheDiTBackend,
+    CacheDiTEnableResult,
     cache_summary,
     enable_cache_for_dit,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "CUSTOM_DIT_ENABLERS",
     "CacheDiTAdapterConfig",
     "CacheDiTBackend",
+    "CacheDiTEnableResult",
     "CacheDiTConfig",
     "CacheDiTRequestSpec",
     "RequestScopedCacheDiTRuntime",

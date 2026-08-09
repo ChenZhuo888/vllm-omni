@@ -20,7 +20,10 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from .attention import VarlenHandler, apply_rotary_emb, ulysses_packed_attention_with_sink
+from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
+from vllm_omni.diffusion.attention.layer import Attention
+
+from .attention import Magi2PackedAttentionKernel, VarlenHandler, apply_rotary_emb
 from .configuration_magi2 import Magi2PreviewConfig
 from .layers import (
     ElementWiseFourierEmbed,
@@ -102,6 +105,21 @@ class Magi2Attention(nn.Module):
             num_modality=num_modality,
             out_dtype=torch.float32,
         )
+        # MAGI-2's packed CFG sequences, learned sink logits, softcap, and
+        # uneven Ulysses splits require a model kernel. Route it through the
+        # framework Attention layer so compile/dispatch ownership remains
+        # shared while the model kernel owns its specialized communication.
+        self.packed_attention = Attention(
+            num_heads=self.num_heads_q,
+            num_kv_heads=self.num_heads_kv,
+            head_size=self.head_dim,
+            causal=False,
+            softmax_scale=self.head_dim**-0.5,
+            qkv_layout="THD",
+            skip_sequence_parallel=True,
+            disable_kv_quant=True,
+            custom_attention=Magi2PackedAttentionKernel(config.attention_softcap),
+        )
 
     def _shard_sinks(self, checkpoint_tensor: torch.Tensor) -> torch.Tensor:
         if tuple(checkpoint_tensor.shape) == tuple(self.sinks.shape):
@@ -142,14 +160,17 @@ class Magi2Attention(nn.Module):
         k = apply_rotary_emb(k, cos, sin).squeeze(0).to(self.config.params_dtype)
         v = v.squeeze(0).to(self.config.params_dtype)
 
-        output = ulysses_packed_attention_with_sink(
+        output = self.packed_attention(
             q,
             k,
             v,
-            varlen_handler,
-            cp_split_sizes,
-            softcap=self.config.attention_softcap,
-            sink=self.sinks,
+            AttentionMetadata(
+                extra={
+                    "magi2_varlen": varlen_handler,
+                    "magi2_split_sizes": cp_split_sizes,
+                    "magi2_sink": self.sinks,
+                }
+            ),
         )
         output = modality_dispatcher.permute(output)
         output = output * torch.sigmoid(gates)
@@ -606,8 +627,7 @@ class Magi2PreviewTransformer(nn.Module):
         cp_split_sizes = dispatcher.split_sizes
 
         time_mask = modality_mapping == int(Modality.TIME)
-        modality_mapping = modality_mapping.clone()
-        modality_mapping[time_mask] = int(Modality.TEXT)
+        modality_mapping = torch.where(time_mask, int(Modality.TEXT), modality_mapping)
         modality_dispatcher = ModalityDispatcher(modality_mapping, 3)
         video_indices = torch.nonzero(modality_mapping == int(Modality.VIDEO)).flatten()
         audio_indices = torch.nonzero(modality_mapping == int(Modality.AUDIO)).flatten()

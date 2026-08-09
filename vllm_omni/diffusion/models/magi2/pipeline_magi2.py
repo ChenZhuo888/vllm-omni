@@ -155,7 +155,7 @@ def _config_value(
     return os.environ.get(env_key, default)
 
 
-def _env_flag(value: Any, *, default: bool = False) -> bool:
+def _env_flag(value: object, *, default: bool = False) -> bool:
     if value is None:
         return default
     if isinstance(value, bool):
@@ -213,8 +213,6 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
         unsupported.append("enable_cpu_offload")
     if od_config.quantization_config is not None:
         unsupported.append("quantization")
-    if od_config.cache_backend not in (None, "none"):
-        unsupported.append(f"cache_backend={od_config.cache_backend}")
     if unsupported:
         raise ValueError(
             "MAGI-2 Preview uses Ulysses sequence parallelism and MoE-head "
@@ -301,7 +299,7 @@ def _seed_request(seed: int, deterministic: bool) -> None:
         torch.use_deterministic_algorithms(True)
 
 
-def _resolve_request_seed(sampling: Any) -> int:
+def _resolve_request_seed(sampling: object) -> int:
     seed = getattr(sampling, "seed", None)
     if seed is not None:
         return int(seed)
@@ -313,7 +311,7 @@ def _resolve_request_seed(sampling: Any) -> int:
     return 42
 
 
-def _single_image(value: Any) -> str | Image.Image | None:
+def _single_image(value: object) -> str | Image.Image | None:
     if value is None:
         return None
     if isinstance(value, list | tuple):
@@ -364,7 +362,7 @@ def _resize_video(video: np.ndarray, width: int, height: int) -> np.ndarray:
     return frames.numpy()
 
 
-def _magi2_post_process(output: Any) -> Any:
+def _magi2_post_process(output: object) -> object:
     return dict(output) if isinstance(output, Mapping) else output
 
 
@@ -403,7 +401,7 @@ class _Magi2StagedComponent(nn.Module):
     def offload_to_cpu(self) -> None:
         self._stager.offload()
 
-    def forward(self, *args: Any, **kwargs: Any) -> Any:
+    def forward(self, *args: object, **kwargs: object) -> object:
         return self.module(*args, **kwargs)
 
 
@@ -451,8 +449,10 @@ class Magi2Pipeline(
             return f"transformer.{checkpoint_key}"
         return None
 
-    def __init__(self, od_config: OmniDiffusionConfig, **kwargs: Any) -> None:
-        del kwargs
+    def __init__(self, od_config: OmniDiffusionConfig, **kwargs: object) -> None:
+        if kwargs:
+            names = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected MAGI-2 pipeline initialization argument(s): {names}")
         super().__init__()
         if not od_config.model:
             raise ValueError("MAGI-2 requires od_config.model")
@@ -643,14 +643,19 @@ class Magi2Pipeline(
             return tensor.to(self.device_str)
 
         source_global_rank = dist.get_global_rank(group.group, 0)
-        metadata: list[Any] = [(tuple(tensor.shape), tensor.dtype) if group.rank == 0 else None]
+        metadata: list[tuple[tuple[int, ...], torch.dtype] | None] = [
+            (tuple(tensor.shape), tensor.dtype) if group.rank == 0 else None
+        ]
         dist.broadcast_object_list(
             metadata,
             src=source_global_rank,
             group=group.group,
             device=torch.device(self.device_str),
         )
-        shape, dtype = metadata[0]
+        resolved_metadata = metadata[0]
+        if resolved_metadata is None:
+            raise RuntimeError("source rank did not broadcast tensor metadata")
+        shape, dtype = resolved_metadata
         if group.rank == 0:
             assert tensor is not None
             output = tensor.to(device=self.device_str, dtype=dtype).contiguous()
@@ -851,10 +856,10 @@ class Magi2Pipeline(
             raise OmniClientError("MAGI-2 currently supports one request at a time")
 
         raw_prompt = req.prompts[0]
-        image_value: Any = None
+        image_value: object = None
         if isinstance(raw_prompt, str):
             prompt = raw_prompt
-            multimodal: Mapping[str, Any] = {}
+            multimodal: Mapping[str, object] = {}
         elif isinstance(raw_prompt, Mapping):
             prompt = str(raw_prompt.get("prompt") or "")
             multimodal = raw_prompt.get("multi_modal_data") or {}

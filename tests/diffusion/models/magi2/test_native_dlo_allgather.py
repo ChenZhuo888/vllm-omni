@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from contextlib import ExitStack, contextmanager
-from types import SimpleNamespace
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import pytest
@@ -32,6 +32,18 @@ from vllm_omni.diffusion.offloader.distributed_layerwise_backend import (
     DistributedLayerwiseOffloadBackend,
     DistributedLayerwiseOffloadHook,
 )
+
+
+@dataclass(frozen=True)
+class _BackendConfigStub:
+    model_path: str
+
+
+@dataclass(frozen=True)
+class _PipelineModulesStub:
+    dits: list[nn.Module]
+    dit_names: list[str]
+
 
 _WORLD_SIZE = 4
 pytestmark = [pytest.mark.diffusion, pytest.mark.cpu, pytest.mark.core_model]
@@ -143,11 +155,11 @@ def _load_mmap_transform_and_reconstruct(
         pipeline.transformer = target
 
         backend = object.__new__(DistributedLayerwiseOffloadBackend)
-        backend.config = SimpleNamespace(model_path=checkpoint_root)
+        backend.config = _BackendConfigStub(model_path=checkpoint_root)
         backend.device = torch.device("cpu")
         backend._load_weights_via_mmap(
             pipeline,
-            SimpleNamespace(dits=[target], dit_names=["transformer"]),
+            _PipelineModulesStub(dits=[target], dit_names=["transformer"]),
         )
 
     target_block = target.block.layers[0]

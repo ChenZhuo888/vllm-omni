@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import cache_dit
 import torch
 
+from vllm_omni.diffusion.cache.cachedit.model_specific import enable_cache_for_magi2
+from vllm_omni.diffusion.data import DiffusionCacheConfig
 from vllm_omni.diffusion.models.magi2.attention import (
     VarlenHandler,
     correct_out_lse_with_sink,
@@ -34,9 +37,14 @@ from vllm_omni.diffusion.models.magi2.parallel import (
 from vllm_omni.diffusion.offloader.block_discovery import get_blocks_from_dit
 
 
-def _tiny_config(params_dtype: torch.dtype = torch.float32) -> Magi2PreviewConfig:
+def _tiny_config(
+    params_dtype: torch.dtype = torch.float32,
+    *,
+    num_layers: int = 1,
+) -> Magi2PreviewConfig:
+    layer_indices = tuple(range(num_layers))
     return Magi2PreviewConfig(
-        num_layers=1,
+        num_layers=num_layers,
         hidden_size=16,
         head_dim=8,
         num_query_groups=2,
@@ -44,7 +52,7 @@ def _tiny_config(params_dtype: torch.dtype = torch.float32) -> Magi2PreviewConfi
         audio_in_channels=4,
         text_in_channels=4,
         intermediate_factor=2,
-        multimodal_layers=(0,),
+        multimodal_layers=layer_indices,
         params_dtype=params_dtype,
         mhc=Magi2MHCConfig(num_streams=2),
         moe=Magi2MoEConfig(
@@ -54,7 +62,7 @@ def _tiny_config(params_dtype: torch.dtype = torch.float32) -> Magi2PreviewConfi
             expert_intermediate_size=8,
             shared_expert_intermediate_size=8,
             modality_shared_expert_intermediate_size=8,
-            layers=(0,),
+            layers=layer_indices,
         ),
     )
 
@@ -189,6 +197,62 @@ def test_tiny_native_preview_forward_returns_video_audio_channels_only() -> None
     assert output.shape == (6, 4)
     assert torch.isfinite(output).all()
     torch.testing.assert_close(output[4:], torch.zeros_like(output[4:]))
+
+
+def test_tiny_native_preview_runs_through_nested_cachedit_adapter() -> None:
+    model = Magi2PreviewTransformer(_tiny_config(num_layers=3))
+    _initialize_tiny_model(model, seed=11)
+    pipeline = type("Magi2TestPipeline", (), {"transformer": model})()
+    result = enable_cache_for_magi2(
+        pipeline,
+        DiffusionCacheConfig(
+            Fn_compute_blocks=1,
+            Bn_compute_blocks=0,
+            max_warmup_steps=1,
+            residual_diff_threshold=1.0,
+        ),
+    )
+    result.refresh(pipeline, 4, verbose=False)
+    packed = torch.randn(6, 4)
+    coordinates = torch.ones(6, 9)
+    modalities = torch.tensor(
+        [
+            Modality.VIDEO,
+            Modality.VIDEO,
+            Modality.AUDIO,
+            Modality.AUDIO,
+            Modality.TEXT,
+            Modality.TEXT,
+        ]
+    )
+    cumulative = torch.tensor([0, 6], dtype=torch.int32)
+    varlen = VarlenHandler(cumulative, cumulative, 6, 6)
+
+    execution_counts = [0, 0, 0]
+    hooks = [
+        layer.register_forward_hook(
+            lambda _module, _args, _output, layer_index=index: execution_counts.__setitem__(
+                layer_index, execution_counts[layer_index] + 1
+            )
+        )
+        for index, layer in enumerate(model.block.layers)
+    ]
+    try:
+        with torch.no_grad():
+            first = model(packed, coordinates, modalities, varlen)
+            second = model(packed, coordinates, modalities, varlen)
+        assert torch.isfinite(first).all()
+        assert torch.isfinite(second).all()
+        # The first layer is the configured Fn block and always executes. The
+        # zero-residual repeated input hits the cache on the second call, so
+        # the two middle layers are skipped.
+        assert execution_counts == [2, 1, 1]
+    finally:
+        for hook in hooks:
+            hook.remove()
+        cache_dit.disable_cache(result.targets[0])
+
+    assert not getattr(model.block, "_is_cached", False)
 
 
 def test_tiny_native_preview_matches_pinned_reference_golden() -> None:

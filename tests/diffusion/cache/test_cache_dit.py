@@ -55,6 +55,7 @@ def test_custom_cache_dit_enablers_are_registered_explicitly():
         "Cosmos3OmniDiffusersPipeline": cd_model_specific.enable_cache_for_cosmos3,
         "Cosmos3OmniPipeline": cd_model_specific.enable_cache_for_cosmos3,
         "Krea2Pipeline": cd_model_specific.enable_cache_for_krea2,
+        "Magi2Pipeline": cd_model_specific.enable_cache_for_magi2,
     }
 
     with patch.dict(cd_backend.CUSTOM_DIT_ENABLERS, {}, clear=True):
@@ -74,12 +75,50 @@ def test_cosmos3_aliases_use_cosmos3_custom_cache_dit_enabler(pipeline_name: str
     assert cd_backend.CUSTOM_DIT_ENABLERS[pipeline_name] is cd_model_specific.enable_cache_for_cosmos3
 
 
+@patch("vllm_omni.diffusion.cache.cachedit.model_specific.enable_cache_for_dit")
+@patch("vllm_omni.diffusion.cache.cachedit.model_specific.BlockAdapter")
+def test_magi2_cache_dit_targets_only_nested_repeated_layers(mock_block_adapter, mock_enable_cache):
+    pipeline = Mock()
+    transformer_block = pipeline.transformer.block
+    layers = torch.nn.ModuleList([torch.nn.Identity()])
+    transformer_block.layers = layers
+    adapter = mock_block_adapter.return_value
+    refresh = Mock()
+    mock_enable_cache.return_value = refresh
+
+    result = cd_model_specific.enable_cache_for_magi2(pipeline, SAMPLE_CACHE_CONFIG)
+
+    mock_block_adapter.assert_called_once()
+    adapter_kwargs = mock_block_adapter.call_args.kwargs
+    assert adapter_kwargs["transformer"] is transformer_block
+    assert adapter_kwargs["blocks"] == [layers]
+    assert adapter_kwargs["has_separate_cfg"] is False
+    assert adapter_kwargs["check_forward_pattern"] is True
+    assert result.refresh is refresh
+    assert result.targets == (adapter,)
+    get_transformer = mock_enable_cache.call_args.kwargs["get_pipeline_transformer"]
+    assert get_transformer(pipeline) is transformer_block
+
+
+@patch("vllm_omni.diffusion.cache.cachedit.backend.cache_dit.summary")
+@patch("vllm_omni.diffusion.cache.cachedit.backend.BlockAdapter.is_cached", return_value=True)
+def test_cache_summary_uses_custom_nested_targets(mock_is_cached, mock_summary):
+    target = object()
+    pipeline = Mock(_cache_dit_targets=(target,))
+
+    cd_backend.cache_summary(pipeline, details=True)
+
+    mock_is_cached.assert_called_once_with(target)
+    mock_summary.assert_called_once_with(target, details=True)
+
+
 def test_cachedit_public_api_is_explicit():
     assert set(cd_backend.__all__) == {
         "BagelCachedAdapter",
         "CUSTOM_DIT_ENABLERS",
         "CacheDiTAdapterConfig",
         "CacheDiTBackend",
+        "CacheDiTEnableResult",
         "CacheDiTConfig",
         "CacheDiTRequestSpec",
         "RequestScopedCacheDiTRuntime",

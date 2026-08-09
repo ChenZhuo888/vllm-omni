@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -205,7 +204,7 @@ def scatter_seqlen_gather_heads(
     group: Magi2ParallelGroup | None = None,
     *,
     async_op: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, Any]:
+) -> torch.Tensor | tuple[torch.Tensor, dist.Work | _CompletedWork]:
     """Ulysses ``[sum(S_r), H, D] -> [S_rank, world*H, D]`` exchange."""
 
     group = group or get_magi2_ulysses_group()

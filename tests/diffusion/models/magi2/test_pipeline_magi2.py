@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from types import MethodType, SimpleNamespace
+from types import MethodType
+from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -33,6 +35,62 @@ from vllm_omni.model_extras.registry import get_extra_body_params
 pytestmark = [pytest.mark.diffusion, pytest.mark.cpu, pytest.mark.core_model]
 
 
+@dataclass
+class _SamplingStub:
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
+    frame_rate: float | None = None
+    resolved_frame_rate: float | None = None
+    num_frames: int = 1
+    num_inference_steps: int | None = None
+    num_outputs_per_prompt: int = 1
+    seed: int | None = 42
+    generator: torch.Generator | list[torch.Generator] | None = None
+    extra_args: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _RequestStub:
+    prompts: list[Any]
+    sampling_params: _SamplingStub
+    num_reqs: int = 1
+
+
+@dataclass
+class _ParallelStub:
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    tensor_parallel_size: int = 1
+    sequence_parallel_size: int = 1
+    ulysses_degree: int = 1
+    ring_degree: int = 1
+    allgather_degree: int = 1
+    cfg_parallel_size: int = 1
+    vae_patch_parallel_size: int = 1
+    text_encoder_tp_size: int = 1
+    enable_expert_parallel: bool = False
+    use_hsdp: bool = False
+
+
+@dataclass
+class _TopologyStub:
+    parallel_config: _ParallelStub = field(default_factory=_ParallelStub)
+    enable_cpu_offload: bool = False
+    enable_layerwise_offload: bool = False
+    enable_distributed_layerwise_offload: bool = False
+    dlo_use_allgather: bool = True
+    quantization_config: object = None
+    cache_backend: str = "none"
+    custom_pipeline_args: dict[str, object] = field(default_factory=dict)
+    additional_config: dict[str, object] = field(default_factory=lambda: {"magi2_allow_unsupported_topology": True})
+
+
+@dataclass(frozen=True)
+class _ReplicaGroupStub:
+    world_size: int = 1
+
+
 class _FakeNativeRuntime:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -58,19 +116,10 @@ def _pipeline() -> tuple[Magi2Pipeline, _FakeNativeRuntime]:
 
 
 def _request(prompt, **sampling_overrides):
-    sampling = SimpleNamespace(
-        width=None,
-        height=None,
-        fps=None,
-        num_frames=1,
-        num_inference_steps=None,
-        num_outputs_per_prompt=1,
-        seed=42,
-        extra_args={},
-    )
+    sampling = _SamplingStub()
     for key, value in sampling_overrides.items():
         setattr(sampling, key, value)
-    return SimpleNamespace(num_reqs=1, prompts=[prompt], sampling_params=sampling)
+    return _RequestStub(prompts=[prompt], sampling_params=sampling)
 
 
 def _checkpoint_tree(root: Path) -> None:
@@ -226,6 +275,11 @@ def test_pathlike_image_is_normalized():
     assert _single_image(Path("first-frame.png")) == "first-frame.png"
 
 
+def test_pipeline_rejects_unknown_initialization_arguments():
+    with pytest.raises(TypeError, match=r"Unexpected MAGI-2.*unknown_option"):
+        Magi2Pipeline(None, unknown_option=True)
+
+
 def test_forward_rejects_multiple_outputs(monkeypatch):
     pipe, _ = _pipeline()
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -244,31 +298,8 @@ def test_post_process_keeps_dynamic_metadata():
 
 
 def _topology_config(**overrides):
-    parallel = SimpleNamespace(
-        pipeline_parallel_size=1,
-        data_parallel_size=1,
-        tensor_parallel_size=1,
-        sequence_parallel_size=1,
-        ulysses_degree=1,
-        ring_degree=1,
-        allgather_degree=1,
-        cfg_parallel_size=1,
-        vae_patch_parallel_size=1,
-        text_encoder_tp_size=1,
-        enable_expert_parallel=False,
-        use_hsdp=False,
-    )
-    config = SimpleNamespace(
-        parallel_config=parallel,
-        enable_cpu_offload=False,
-        enable_layerwise_offload=False,
-        enable_distributed_layerwise_offload=False,
-        dlo_use_allgather=True,
-        quantization_config=None,
-        cache_backend="none",
-        custom_pipeline_args={},
-        additional_config={"magi2_allow_unsupported_topology": True},
-    )
+    parallel = _ParallelStub()
+    config = _TopologyStub(parallel_config=parallel)
     for key, value in overrides.items():
         if hasattr(parallel, key):
             setattr(parallel, key, value)
@@ -375,7 +406,7 @@ def test_prompt_pair_uses_one_text_encoder_residency_window(monkeypatch):
     nn.Module.__init__(pipeline)
     pipeline._is_output_rank = True
     pipeline._offload_aux_after_use = True
-    pipeline._parallel_group = SimpleNamespace(world_size=1)
+    pipeline._parallel_group = _ReplicaGroupStub()
     pipeline.device_str = "cpu"
     pipeline.dtype = torch.float32
     pipeline.text_encoder = component

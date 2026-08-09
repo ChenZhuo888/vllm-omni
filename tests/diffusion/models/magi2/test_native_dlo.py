@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from types import SimpleNamespace
+from dataclasses import dataclass, field
 
 import pytest
 import torch
@@ -36,6 +36,46 @@ from vllm_omni.diffusion.offloader.distributed_layerwise_backend import (
 from vllm_omni.diffusion.offloader.offload_plan import supports_mmap_loading
 
 pytestmark = [pytest.mark.diffusion, pytest.mark.cpu, pytest.mark.core_model]
+
+
+@dataclass
+class _ParallelConfigStub:
+    data_parallel_size: int
+    tensor_parallel_size: int
+    sequence_parallel_size: int
+    ulysses_degree: int
+    pipeline_parallel_size: int = 1
+    ring_degree: int = 1
+    allgather_degree: int = 1
+    cfg_parallel_size: int = 1
+    vae_patch_parallel_size: int = 1
+    text_encoder_tp_size: int = 1
+    enable_expert_parallel: bool = False
+    use_hsdp: bool = False
+
+
+@dataclass
+class _TopologyConfigStub:
+    parallel_config: _ParallelConfigStub
+    enable_distributed_layerwise_offload: bool
+    dlo_use_allgather: bool
+    enable_cpu_offload: bool = False
+    enable_layerwise_offload: bool = False
+    quantization_config: object = None
+    cache_backend: str = "none"
+    custom_pipeline_args: dict[str, object] = field(default_factory=dict)
+    additional_config: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _BackendConfigStub:
+    model_path: str
+
+
+@dataclass(frozen=True)
+class _PipelineModulesStub:
+    dits: list[nn.Module]
+    dit_names: list[str]
 
 
 def _tiny_config() -> Magi2PreviewConfig:
@@ -70,30 +110,16 @@ def _topology_config(
     sp: int,
     distributed_offload: bool,
     dlo_allgather: bool,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+) -> _TopologyConfigStub:
+    return _TopologyConfigStub(
+        parallel_config=_ParallelConfigStub(
             data_parallel_size=dp,
             tensor_parallel_size=tp,
             sequence_parallel_size=sp,
             ulysses_degree=sp,
-            ring_degree=1,
-            allgather_degree=1,
-            cfg_parallel_size=1,
-            vae_patch_parallel_size=1,
-            text_encoder_tp_size=1,
-            enable_expert_parallel=False,
-            use_hsdp=False,
         ),
-        enable_cpu_offload=False,
-        enable_layerwise_offload=False,
         enable_distributed_layerwise_offload=distributed_offload,
         dlo_use_allgather=dlo_allgather,
-        quantization_config=None,
-        cache_backend="none",
-        custom_pipeline_args={},
-        additional_config={},
     )
 
 
@@ -222,10 +248,10 @@ def test_generic_mmap_loader_uses_the_real_block_path_and_keeps_ep_slicing(
     moe_parameter_name = "block.layers.0.mlp.moe_mlp.gate"
     expected_local_shape = tuple(dict(target.named_parameters())[moe_parameter_name].shape)
     backend = object.__new__(DistributedLayerwiseOffloadBackend)
-    backend.config = SimpleNamespace(model_path=str(tmp_path))
+    backend.config = _BackendConfigStub(model_path=str(tmp_path))
     backend._load_weights_via_mmap(
         pipeline,
-        SimpleNamespace(dits=[target], dit_names=["transformer"]),
+        _PipelineModulesStub(dits=[target], dit_names=["transformer"]),
     )
 
     assert all(not parameter.is_meta for parameter in target.parameters())
@@ -267,10 +293,10 @@ def test_mmap_loader_uses_pipeline_resolved_checkpoint_root(
     # This deliberately cannot be resolved or downloaded. The pipeline root
     # is authoritative because it already incorporates URL normalization and
     # the requested/pinned Hugging Face revision.
-    backend.config = SimpleNamespace(model_path="invalid-owner/invalid-model")
+    backend.config = _BackendConfigStub(model_path="invalid-owner/invalid-model")
     backend._load_weights_via_mmap(
         pipeline,
-        SimpleNamespace(dits=[target], dit_names=["transformer"]),
+        _PipelineModulesStub(dits=[target], dit_names=["transformer"]),
     )
 
     assert all(not parameter.is_meta for parameter in target.parameters())
@@ -329,7 +355,7 @@ def test_requested_four_worker_topologies_are_accepted(
 )
 def test_invalid_dlo_topologies_are_rejected(
     monkeypatch: pytest.MonkeyPatch,
-    config: SimpleNamespace,
+    config: _TopologyConfigStub,
     message: str,
 ) -> None:
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)

@@ -125,6 +125,37 @@ python examples/offline_inference/image_to_video/image_to_video.py \
 For a load-and-kernel smoke test, change `--num-inference-steps 100` to `1`.
 The one-step form is not a quality evaluation.
 
+#### Cache-DiT acceleration
+
+MAGI-2 supports the shared Cache-DiT backend. Add these flags to either shared
+offline command:
+
+```text
+--cache-backend cache_dit \
+--enable-cache-dit-summary
+```
+
+The adapter wraps only `transformer.block.layers`, the repeated native
+denoising stack. The pre-adapter, post-adapter, packed CFG preparation,
+learned-sink attention, and video/audio decoders still execute normally.
+MAGI-2 packs conditional and unconditional tokens into one transformer call,
+so Cache-DiT treats each call as one denoising step rather than alternating CFG
+passes. The same adapter composes with the DLO layouts below; DLO continues to
+own layer placement while Cache-DiT decides whether the middle layers need to
+execute for a step.
+
+Cache-DiT is approximate acceleration. Keep the resident SP4 command without
+`--cache-backend` as the reference-aligned quality baseline, and validate the
+selected cache policy against that baseline for quality-sensitive workloads.
+
+The adapter lifecycle was exercised locally with rank-local DLO SP4 on four
+NVIDIA L20X GPUs using the shared T2VA command at 272p and four denoising
+steps. All four ranks installed and refreshed Cache-DiT, the request completed,
+and the output contained 125 448x256 frames at 12.5 fps plus stereo 44.1 kHz
+audio. This short run validates integration and output contracts, not quality
+or performance. A focused three-layer test separately forces a cache hit and
+verifies that only the configured front block executes on the cached step.
+
 #### 272p variant
 
 Use the same command with these overrides:

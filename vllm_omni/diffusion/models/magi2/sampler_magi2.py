@@ -261,12 +261,15 @@ class Magi2PreviewSampler:
             t_value = torch.tensor(float(t), device=latent.device, dtype=latent.dtype)
         t_normalized = t_value / 1000.0
         cfg_batch = batch_size * 2
-        t_batch = t_normalized.expand(cfg_batch).clone()
+        t_batch = t_normalized.expand(cfg_batch)
 
         _, _, video_t, video_h, video_w = latent.shape
         audio_t = audio_latent.shape[1]
-        per_token_video_t = t_batch.view(-1, 1, 1, 1, 1).expand(cfg_batch, 1, video_t, video_h, video_w).clone()
-        per_token_audio_t = t_batch.view(-1, 1, 1).expand(cfg_batch, audio_t, 1).clone()
+        # Keep zero-stride views here. Patchification/materialization happens
+        # once in the data proxy, so cloning the full token grids every denoise
+        # step only increases peak memory and allocator pressure.
+        per_token_video_t = t_batch.view(-1, 1, 1, 1, 1).expand(cfg_batch, 1, video_t, video_h, video_w)
+        per_token_audio_t = t_batch.view(-1, 1, 1).expand(cfg_batch, audio_t, 1)
 
         audio_lengths = torch.full(
             (cfg_batch,),

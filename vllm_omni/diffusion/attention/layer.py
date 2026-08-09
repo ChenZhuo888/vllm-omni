@@ -61,12 +61,19 @@ class Attention(nn.Module):
         # perf for this layer (e.g. Wan2.2 cross-attn has short sequences and
         # block-FP8 quant offers no win). Default False = follow global config.
         disable_kv_quant: bool = False,
+        # Model-owned kernel for architectures whose attention contract cannot
+        # be represented by the generic backend interface (for example packed
+        # varlen attention with learned sink logits). The shared Attention
+        # layer still owns parallel dispatch and compile boundaries.
+        custom_attention: nn.Module | None = None,
     ):
         super().__init__()
 
         self.role = role
         self.role_category = role_category
         self.qkv_layout = qkv_layout
+
+        self._has_custom_attention = custom_attention is not None
 
         # Resolve backend via role-aware config.
         # The global diffusion config is set during model init via
@@ -82,51 +89,60 @@ class Attention(nn.Module):
         model_class_name = getattr(config, "model_class_name", None) if config is not None else None
         allow_trtllm_default = get_diffusion_model_metadata(model_class_name).attention_mask_free
 
-        attn_backend_cls, spec = get_attn_backend_for_role(
-            role=role,
-            head_size=head_size,
-            attention_config=attention_config,
-            role_category=role_category,
-            allow_trtllm_default=allow_trtllm_default,
-        )
-        parallel_config = getattr(config, "parallel_config", None)
-        allgather_degree = getattr(parallel_config, "allgather_degree", 1)
-        # TODO: Move AllGather-KV compatibility into an AttentionBackend capability
-        # so validation does not depend on backend names.
-        if not skip_sequence_parallel and allgather_degree > 1 and attn_backend_cls.get_name() == "TRTLLM_ATTN":
-            raise ValueError(
-                "TRTLLM_ATTN does not support AllGather-KV sequence parallelism. "
-                "Set --allgather-degree 1 or select another diffusion attention backend."
+        if custom_attention is None:
+            attn_backend_cls, spec = get_attn_backend_for_role(
+                role=role,
+                head_size=head_size,
+                attention_config=attention_config,
+                role_category=role_category,
+                allow_trtllm_default=allow_trtllm_default,
             )
-        if spec is not None:
-            backend_kwargs = spec.backend_kwargs()
-            self.backend_pref = spec.backend
-            logger.debug("Attention(role=%s) → backend=%s", role, spec.backend)
-        else:
-            logger.debug("Attention(role=%s) → platform default", role)
+            parallel_config = getattr(config, "parallel_config", None)
+            allgather_degree = getattr(parallel_config, "allgather_degree", 1)
+            # TODO: Move AllGather-KV compatibility into an AttentionBackend capability
+            # so validation does not depend on backend names.
+            if not skip_sequence_parallel and allgather_degree > 1 and attn_backend_cls.get_name() == "TRTLLM_ATTN":
+                raise ValueError(
+                    "TRTLLM_ATTN does not support AllGather-KV sequence parallelism. "
+                    "Set --allgather-degree 1 or select another diffusion attention backend."
+                )
+            if spec is not None:
+                backend_kwargs = spec.backend_kwargs()
+                self.backend_pref = spec.backend
+                logger.debug("Attention(role=%s) → backend=%s", role, spec.backend)
+            else:
+                logger.debug("Attention(role=%s) → platform default", role)
 
-        self.attn_backend = attn_backend_cls
-        self.attn_impl_cls = self.attn_backend.get_impl_cls()
-        self.attention = self.attn_impl_cls(
-            num_heads=num_heads,
-            head_size=head_size,
-            softmax_scale=softmax_scale,
-            causal=causal,
-            num_kv_heads=num_kv_heads,
-            qkv_layout=qkv_layout,
-            prefix=prefix,
-            backend_kwargs=backend_kwargs,
-            role=role,
-        )
-        # Instantiate fallback backend for float32 support
-        self.sdpa_fallback = SDPABackend.get_impl_cls()(
-            num_heads=num_heads,
-            head_size=head_size,
-            softmax_scale=softmax_scale,
-            causal=causal,
-            num_kv_heads=num_kv_heads,
-            qkv_layout=qkv_layout,
-        )
+            self.attn_backend = attn_backend_cls
+            self.attn_impl_cls = self.attn_backend.get_impl_cls()
+            self.attention = self.attn_impl_cls(
+                num_heads=num_heads,
+                head_size=head_size,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                num_kv_heads=num_kv_heads,
+                qkv_layout=qkv_layout,
+                prefix=prefix,
+                backend_kwargs=backend_kwargs,
+                role=role,
+            )
+            # Instantiate fallback backend for float32 support.
+            self.sdpa_fallback = SDPABackend.get_impl_cls()(
+                num_heads=num_heads,
+                head_size=head_size,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                num_kv_heads=num_kv_heads,
+                qkv_layout=qkv_layout,
+            )
+        else:
+            if not skip_sequence_parallel:
+                raise ValueError("custom_attention must own its communication and requires skip_sequence_parallel=True")
+            self.attn_backend = None
+            self.attn_impl_cls = type(custom_attention)
+            self.attention = custom_attention
+            self.sdpa_fallback = None
+            logger.debug("Attention(role=%s) → custom kernel=%s", role, type(custom_attention).__name__)
 
         self.softmax_scale = softmax_scale
         self.scatter_idx = scatter_idx
@@ -187,7 +203,7 @@ class Attention(nn.Module):
         return self.parallel_strategy
 
     def _init_kv_cache_quantization(self, config) -> None:
-        if config is None:
+        if config is None or self._has_custom_attention:
             return
         dtype = getattr(config, "diffusion_kv_cache_dtype", None)
         if dtype == "auto":
@@ -300,6 +316,9 @@ class Attention(nn.Module):
         return out
 
     def _run_local_attention(self, query, key, value, attn_metadata):
+        if self._has_custom_attention:
+            return self.attention(query, key, value, attn_metadata)
+
         self._assert_piecewise_compatible(attn_metadata)
 
         if query.dtype == torch.float32:
@@ -316,6 +335,8 @@ class Attention(nn.Module):
         if attn_metadata is None or attn_metadata.full_attn_spans is None:
             return
         if attn_metadata.attn_mask is not None and attn_metadata.attn_mask.ndim == 4:
+            return
+        if self.attn_backend is None:
             return
         backend_name = self.attn_backend.get_name()
         if not self.attn_backend.supports_piecewise_spans:
