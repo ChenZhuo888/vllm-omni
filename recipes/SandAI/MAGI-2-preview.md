@@ -144,6 +144,32 @@ ffprobe -v error \
 The output should contain 125 video frames at 896x512 and 12.5 fps, plus stereo
 44.1 kHz audio.
 
+#### Full-quality four-GPU DLO qualification
+
+The full Preview workflow was exercised from source head `a5af2a8c` on four
+NVIDIA L20X GPUs in deterministic BF16 mode. Both runs used rank-local DLO SP4
+with all 40 transformer blocks streamed and zero resident layers:
+
+```text
+--tensor-parallel-size 1 \
+--ulysses-degree 4 \
+--enable-distributed-layerwise-offload \
+--dlo-no-use-allgather \
+--dlo-resident-layers 0
+```
+
+The shared T2VA command above completed all 100 inference steps at 540p in
+563.855 seconds. The shared I2VA command completed the same 100-step/540p
+contract in 556.533 seconds, using a native 896x512 frame as its image
+condition. Both outputs contain 125 H.264 frames at 12.5 fps for 10 seconds and
+stereo 44.1 kHz AAC audio. Their MP4 SHA-256 values are respectively
+`3437d078e1ce2358e4d02554ce7cdf720b1a93bf71055f4a9b53de0e6f16fdea` and
+`b8c2a4acd333c96c6dfbbdc2b417cc018c22e38daa349b7e23aefd0966ff2de8`.
+
+These are single E2E qualification runs, not benchmark samples. The generated
+artifacts remain outside the repository, and no model-specific example or
+benchmark script is added.
+
 #### Other native four-GPU resident layouts
 
 The native transformer also supports tensor parallelism. All three resident
@@ -278,3 +304,9 @@ Use `--image` in the shared I2V entrypoint rather than the lower-level
   parallelism are not supported for this pipeline.
 - SP-only DLO requires `--dlo-no-use-allgather`; SP ranks own different
   MoE-head shards and cannot form a DLO AllGather group with one another.
+- Full 100-step 540p T2VA and I2VA were qualified only with four-device
+  rank-local DLO SP4. The DP4/DP2SP2 DLO profiles retain bounded one-step and
+  four-step coverage rather than full-quality qualification.
+- The model card's official eight-Hopper runtime was not available on the
+  four-L20X qualification host. Compatible eight-worker topologies pass
+  configuration validation but remain runtime-unqualified in this PR.
