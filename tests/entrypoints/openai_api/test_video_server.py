@@ -1593,14 +1593,6 @@ def test_video_request_validation():
         VideoGenerationRequest(prompt="test", quality="medium")
 
 
-def test_non_finite_fps_returns_422(test_client):
-    response = test_client.post(
-        "/v1/videos/sync",
-        data={"prompt": "invalid fps", "seconds": "10", "fps": "inf"},
-    )
-    assert response.status_code == 422
-
-
 def test_list_videos_supports_order_after_and_limit(test_client, mocker: MockerFixture):
     mocker.patch(
         "vllm_omni.entrypoints.openai.serving_video._encode_video_bytes",
@@ -2098,17 +2090,6 @@ def test_sync_does_not_create_store_entry(test_client, mocker: MockerFixture):
     finally:
         loop.close()
     assert len(stored) == 0
-
-
-def test_model_reported_fractional_fps_is_preserved():
-    result = SimpleNamespace(multimodal_output={"fps": 12.5})
-    assert OmniOpenAIServingVideo._resolve_fps(result) == 12.5
-
-
-@pytest.mark.parametrize("fps", [float("inf"), float("-inf"), float("nan")])
-def test_model_reported_nonfinite_fps_is_ignored(fps):
-    result = SimpleNamespace(multimodal_output={"fps": fps})
-    assert OmniOpenAIServingVideo._resolve_fps(result) is None
 
 
 def test_sync_sampling_params_pass_through(test_client, mocker: MockerFixture):

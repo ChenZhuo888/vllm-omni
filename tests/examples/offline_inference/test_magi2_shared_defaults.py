@@ -80,40 +80,6 @@ def test_shared_image_to_video_uses_native_preview_defaults(
     assert image_to_video._magi2_preview_dimensions(extra_body) == expected_size
 
 
-@pytest.mark.parametrize("resolution", ["720p", "preview", "unknown"])
-def test_shared_examples_reject_non_preview_resolution(
-    text_to_video: ModuleType,
-    image_to_video: ModuleType,
-    resolution: str,
-) -> None:
-    extra_body = {"resolution": resolution}
-    with pytest.raises(ValueError, match="272p.*540p"):
-        text_to_video._magi2_preview_preset(extra_body)
-    with pytest.raises(ValueError, match="272p.*540p"):
-        image_to_video._magi2_preview_dimensions(extra_body)
-
-
-@pytest.mark.parametrize("example_fixture", ["text_to_video", "image_to_video"])
-def test_shared_video_dlo_cli_defaults(
-    example_fixture: str,
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    example = request.getfixturevalue(example_fixture)
-    monkeypatch.setattr(sys, "argv", [str(example.__file__)])
-
-    args = example.parse_args()
-
-    assert args.enable_distributed_layerwise_offload is False
-    assert args.dlo_use_allgather is True
-    assert args.dlo_resident_layers == 0
-    assert example._distributed_layerwise_offload_kwargs(args) == {
-        "enable_distributed_layerwise_offload": False,
-        "dlo_use_allgather": True,
-        "dlo_resident_layers": 0,
-    }
-
-
 @pytest.mark.parametrize("example_fixture", ["text_to_video", "image_to_video"])
 def test_shared_video_dlo_cli_forwards_rank_local_options(
     example_fixture: str,

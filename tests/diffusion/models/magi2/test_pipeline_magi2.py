@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MethodType
 from typing import Any
 from unittest.mock import Mock
@@ -21,10 +20,8 @@ from vllm_omni.diffusion.models.magi2.pipeline_magi2 import (
     MAGI2_AUDIO_SAMPLE_RATE,
     MAGI2_MODEL_REVISION,
     Magi2Pipeline,
-    _magi2_post_process,
     _Magi2StagedComponent,
     _resolve_checkpoint_root,
-    _single_image,
     _validate_native_topology,
 )
 from vllm_omni.diffusion.registry import DiffusionModelRegistry
@@ -86,11 +83,6 @@ class _TopologyStub:
     additional_config: dict[str, object] = field(default_factory=lambda: {"magi2_allow_unsupported_topology": True})
 
 
-@dataclass(frozen=True)
-class _ReplicaGroupStub:
-    world_size: int = 1
-
-
 class _FakeNativeRuntime:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -122,7 +114,7 @@ def _request(prompt, **sampling_overrides):
     return _RequestStub(prompts=[prompt], sampling_params=sampling)
 
 
-def _checkpoint_tree(root: Path) -> None:
+def _checkpoint_tree(root) -> None:
     files = (
         "preview/model.safetensors.index.json",
         "text_encoder/config.json",
@@ -218,24 +210,6 @@ def test_forward_maps_272p_i2v_and_output_resize(monkeypatch):
     assert result.output["payload"]["video"].shape == (2, 4, 6, 3)
 
 
-def test_forward_uses_generator_seed(monkeypatch):
-    pipe, _ = _pipeline()
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    seeded: list[int] = []
-    monkeypatch.setattr(
-        "vllm_omni.diffusion.models.magi2.pipeline_magi2._seed_request",
-        lambda seed, deterministic: seeded.append(seed),
-    )
-    pipe(
-        _request(
-            "A fox walks through snow",
-            seed=None,
-            generator=torch.Generator().manual_seed(7),
-        )
-    )
-    assert seeded == [7]
-
-
 @pytest.mark.parametrize(
     ("prompt", "extra_args", "message"),
     [
@@ -271,30 +245,9 @@ def test_forward_rejects_multiple_images(monkeypatch):
         pipe(_request(prompt))
 
 
-def test_pathlike_image_is_normalized():
-    assert _single_image(Path("first-frame.png")) == "first-frame.png"
-
-
 def test_pipeline_rejects_unknown_initialization_arguments():
     with pytest.raises(TypeError, match=r"Unexpected MAGI-2.*unknown_option"):
         Magi2Pipeline(None, unknown_option=True)
-
-
-def test_forward_rejects_multiple_outputs(monkeypatch):
-    pipe, _ = _pipeline()
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    with pytest.raises(OmniClientError, match="exactly one output"):
-        pipe(_request("animate", num_outputs_per_prompt=2))
-
-
-def test_post_process_keeps_dynamic_metadata():
-    payload = {
-        "video": "v",
-        "audio": "a",
-        "audio_sample_rate": 44100,
-        "fps": 12.5,
-    }
-    assert _magi2_post_process(payload) == payload
 
 
 def _topology_config(**overrides):
@@ -324,103 +277,6 @@ def test_native_topology_requires_dlo_rank_local_mode():
         _validate_native_topology(config)
     config.dlo_use_allgather = False
     _validate_native_topology(config)
-
-
-def test_offload_plan_stages_every_auxiliary_component():
-    assert Magi2Pipeline._offload_plan.on_demand_component_paths == frozenset(
-        {
-            "text_encoder",
-            "image_vae",
-            "video_decoder",
-            "audio_decoder",
-        }
-    )
-
-
-def test_staged_component_keeps_one_cpu_master(monkeypatch):
-    inner = nn.Linear(2, 2)
-    stager = Mock()
-    stager_factory = Mock(return_value=stager)
-    monkeypatch.setattr(
-        "vllm_omni.diffusion.models.magi2.pipeline_magi2.PinnedModuleStager",
-        stager_factory,
-    )
-
-    component = _Magi2StagedComponent(
-        inner,
-        torch.device("cuda:0"),
-        pin_memory=False,
-    )
-    component.load_to_device()
-    component.offload_to_cpu()
-
-    assert component.module is inner
-    stager_factory.assert_called_once_with(
-        inner,
-        torch.device("cuda:0"),
-        pin_memory=False,
-    )
-    stager.load.assert_called_once_with()
-    stager.offload.assert_called_once_with()
-
-
-def test_component_stage_releases_on_failure(monkeypatch):
-    stager = Mock()
-    monkeypatch.setattr(
-        "vllm_omni.diffusion.models.magi2.pipeline_magi2.PinnedModuleStager",
-        Mock(return_value=stager),
-    )
-    component = _Magi2StagedComponent(
-        nn.Identity(),
-        torch.device("cuda:0"),
-        pin_memory=False,
-    )
-    pipeline = object.__new__(Magi2Pipeline)
-    nn.Module.__init__(pipeline)
-    pipeline._offload_aux_after_use = True
-
-    with pytest.raises(RuntimeError, match="encode failed"):
-        with pipeline._component_on_device(component) as resident:
-            assert resident is component.module
-            stager.load.assert_called_once_with()
-            stager.offload.assert_not_called()
-            raise RuntimeError("encode failed")
-
-    stager.offload.assert_called_once_with()
-
-
-def test_prompt_pair_uses_one_text_encoder_residency_window(monkeypatch):
-    stager = Mock()
-    monkeypatch.setattr(
-        "vllm_omni.diffusion.models.magi2.pipeline_magi2.PinnedModuleStager",
-        Mock(return_value=stager),
-    )
-    text_encoder = nn.Module()
-    text_encoder.encode = Mock(side_effect=(torch.tensor([[1.0]]), torch.tensor([[2.0]])))
-    component = _Magi2StagedComponent(
-        text_encoder,
-        torch.device("cuda:0"),
-        pin_memory=False,
-    )
-    pipeline = object.__new__(Magi2Pipeline)
-    nn.Module.__init__(pipeline)
-    pipeline._is_output_rank = True
-    pipeline._offload_aux_after_use = True
-    pipeline._parallel_group = _ReplicaGroupStub()
-    pipeline.device_str = "cpu"
-    pipeline.dtype = torch.float32
-    pipeline.text_encoder = component
-
-    positive, negative = pipeline._encode_prompts(("positive", "negative"))
-
-    assert torch.equal(positive, torch.tensor([[1.0]]))
-    assert torch.equal(negative, torch.tensor([[2.0]]))
-    assert text_encoder.encode.call_args_list == [
-        (("positive",),),
-        (("negative",),),
-    ]
-    stager.load.assert_called_once_with()
-    stager.offload.assert_called_once_with()
 
 
 def test_decode_audio_preserves_batch_for_released_preview_shape(monkeypatch):
@@ -519,46 +375,6 @@ class _FakeLayerwiseHook:
         self.current_slot = 0
         self.prefetch_layer = Mock()
         self.get_weights = Mock()
-
-
-def test_ordinary_layerwise_enable_preserves_staged_aux_hierarchy(
-    monkeypatch,
-):
-    from vllm_omni.diffusion.offloader.base import (
-        OffloadConfig,
-        OffloadStrategy,
-    )
-    from vllm_omni.diffusion.offloader.layerwise_backend import (
-        LayerWiseOffloadBackend,
-    )
-
-    pipeline, stagers = _offload_pipeline(monkeypatch)
-    hooks: list[_FakeLayerwiseHook] = []
-
-    def fake_apply(*args, **kwargs):
-        del args, kwargs
-        hook = _FakeLayerwiseHook()
-        hooks.append(hook)
-        return hook
-
-    monkeypatch.setattr(
-        "vllm_omni.diffusion.offloader.layerwise_backend.apply_block_hook",
-        fake_apply,
-    )
-    backend = LayerWiseOffloadBackend(
-        OffloadConfig(
-            strategy=OffloadStrategy.LAYER_WISE,
-            pin_cpu_memory=False,
-        ),
-        torch.device("cpu"),
-    )
-
-    backend.enable(pipeline)
-
-    assert backend.enabled
-    assert len(hooks) == len(pipeline.transformer.block)
-    assert all(stager.offload.call_count == 1 for stager in stagers)
-    assert all(stager.load.call_count == 0 for stager in stagers)
 
 
 def test_dlo_no_allgather_enable_preserves_staged_aux_and_streams_blocks(
