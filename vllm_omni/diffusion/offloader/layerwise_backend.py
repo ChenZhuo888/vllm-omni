@@ -15,7 +15,6 @@ from vllm_omni.platforms import current_omni_platform
 
 from .base import OffloadBackend, OffloadConfig
 from .module_collector import ModuleDiscovery
-from .offload_plan import get_offload_plan
 
 logger = init_logger(__name__)
 
@@ -295,37 +294,16 @@ class LayerWiseOffloadBackend(OffloadBackend):
             logger.warning("No DiT/transformer modules found, skipping layer-wise offloading")
             return
 
-        plan = get_offload_plan(pipeline)
+        # Move encoders to GPU (they stay resident)
+        for enc in modules.encoders:
+            enc.to(self.device)
 
-        # Pipelines with an explicit stage lifecycle keep large auxiliary
-        # components on the host until their encode/decode phase.  Other
-        # pipelines retain the established resident behavior.
-        for enc, enc_name in zip(modules.encoders, modules.encoder_names):
-            offload_to_cpu = getattr(enc, "offload_to_cpu", None)
-            if plan is not None and enc_name in plan.on_demand_component_paths and callable(offload_to_cpu):
-                offload_to_cpu()
-                logger.info(
-                    "Prepared encoder %s (%s) for pipeline-managed staged offload",
-                    enc_name,
-                    enc.__class__.__name__,
-                )
-            else:
-                enc.to(self.device)
-
-        for vae, vae_name in zip(modules.vaes, modules.vae_names):
-            offload_to_cpu = getattr(vae, "offload_to_cpu", None)
-            if plan is not None and vae_name in plan.on_demand_component_paths and callable(offload_to_cpu):
-                offload_to_cpu()
-                logger.info(
-                    "Prepared VAE %s (%s) for pipeline-managed staged offload",
-                    vae_name,
-                    vae.__class__.__name__,
-                )
-            else:
-                try:
-                    vae.to(self.device, non_blocking=True)
-                except Exception as exc:
-                    logger.debug("Failed to move VAE to GPU: %s", exc)
+        # Move VAE(s) to GPU if available
+        for vae in modules.vaes:
+            try:
+                vae.to(self.device, non_blocking=True)
+            except Exception as exc:
+                logger.debug("Failed to move VAE to GPU: %s", exc)
 
         # Move resident modules to GPU (small modules needed every forward)
         for name, module in zip(modules.resident_names, modules.resident_modules):

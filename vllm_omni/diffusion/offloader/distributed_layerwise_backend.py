@@ -228,17 +228,6 @@ class DistributedLayerwiseOffloadHook(ModelHook):
                     # parameter as an mmap view avoids a private full-model
                     # copy in every worker.
                     local_t = mmap_transform(local_t)
-                    expected_shape = getattr(t, "mmap_expected_shape", None)
-                    if expected_shape is not None and tuple(local_t.shape) != tuple(expected_shape):
-                        raise ValueError(
-                            f"mmap transform for {name!r} produced shape "
-                            f"{tuple(local_t.shape)}, expected {tuple(expected_shape)}"
-                        )
-                    expected_dtype = getattr(t, "mmap_expected_dtype", None)
-                    if expected_dtype is not None and local_t.dtype != expected_dtype:
-                        raise ValueError(
-                            f"mmap transform for {name!r} produced dtype {local_t.dtype}, expected {expected_dtype}"
-                        )
                 # Offload storage is an inference-only host copy. Detaching
                 # prevents copy_ from retaining an autograd graph whose view
                 # semantics can also make all_gather_into_tensor reject its
@@ -632,12 +621,7 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
     overlapped with computation.
     """
 
-    _MMAP_PARAM_ATTRS = (
-        "weight_loader",
-        "mmap_weight_transform",
-        "mmap_expected_shape",
-        "mmap_expected_dtype",
-    )
+    _MMAP_PARAM_ATTRS = ("weight_loader", "mmap_weight_transform")
 
     def __init__(self, config: OffloadConfig, device: torch.device):
         super().__init__(config, device)
@@ -664,15 +648,10 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
 
     def _remember_mmap_param_attrs(self, pipeline: nn.Module) -> None:
         """Save loader metadata before ``to_empty`` replaces Parameters."""
-        self._mmap_param_attrs = {}
-        for name, param in pipeline.named_parameters():
-            attrs = {
-                attr: value for attr in self._MMAP_PARAM_ATTRS if (value := getattr(param, attr, None)) is not None
-            }
-            if callable(attrs.get("mmap_weight_transform")):
-                attrs["mmap_expected_shape"] = tuple(param.shape)
-                attrs["mmap_expected_dtype"] = param.dtype
-            self._mmap_param_attrs[name] = attrs
+        self._mmap_param_attrs = {
+            name: {attr: value for attr in self._MMAP_PARAM_ATTRS if (value := getattr(param, attr, None)) is not None}
+            for name, param in pipeline.named_parameters()
+        }
 
     def _attach_mmap_param_attrs(
         self,
@@ -708,14 +687,9 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         from safetensors import safe_open
 
         model_path = self.config.model_path
-        checkpoint_root_attr = getattr(type(pipeline), "_mmap_checkpoint_root_attr", None)
-        if checkpoint_root_attr is not None:
-            resolved_root = getattr(pipeline, checkpoint_root_attr, None)
-            if not resolved_root:
-                raise RuntimeError(
-                    f"Pipeline-declared mmap checkpoint root attribute {checkpoint_root_attr!r} is not initialized"
-                )
-            model_path = os.fspath(resolved_root)
+        checkpoint_path = getattr(pipeline, "_get_mmap_checkpoint_path", None)
+        if callable(checkpoint_path):
+            model_path = os.fspath(checkpoint_path())
         if not model_path:
             logger.warning("No model_path for mmap weight loading, skipping")
             return
@@ -723,29 +697,17 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         # Resolve HF repo ID to local snapshot path.
         # If model_path is a local directory, use it directly; otherwise
         # download the safetensors index + weight files via HuggingFace Hub.
-        checkpoint_subdir = getattr(type(pipeline), "_mmap_checkpoint_subdir", None)
         if not os.path.isdir(model_path):
             from vllm.model_executor.model_loader.weight_utils import (
                 download_weights_from_hf,
             )
 
             logger.info("model_path %s is not local, downloading from HF", model_path)
-            pattern_prefix = f"{checkpoint_subdir}/" if checkpoint_subdir else ""
             model_path = download_weights_from_hf(
                 model_name_or_path=model_path,
                 cache_dir=None,
-                allow_patterns=[
-                    f"{pattern_prefix}*.safetensors",
-                    f"{pattern_prefix}*.safetensors.index.json",
-                ],
+                allow_patterns=["*.safetensors", "*.safetensors.index.json"],
             )
-
-        if checkpoint_subdir:
-            model_path = os.path.join(model_path, checkpoint_subdir)
-            if not os.path.isdir(model_path):
-                raise RuntimeError(
-                    f"Distributed layerwise offload checkpoint subdirectory does not exist: {model_path}"
-                )
 
         # Build {checkpoint_key: file_path} from safetensors index
         weight_map: dict[str, str] = {}

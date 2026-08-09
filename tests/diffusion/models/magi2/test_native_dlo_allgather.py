@@ -174,7 +174,6 @@ def _load_mmap_transform_and_reconstruct(
     mmap_moe = target_parameters[moe_name]
     assert mmap_moe.mmap_weight_transform_pending is True
     assert callable(mmap_moe.mmap_weight_transform)
-    assert tuple(mmap_moe.mmap_expected_shape) == tuple(oracle_parameters[moe_name].shape)
     assert tuple(mmap_moe.shape) == tuple(checkpoint[f"block.layers.0.{moe_name}"].shape)
 
     # Keep this gloo regression accelerator-isolated. Pinned allocation is the

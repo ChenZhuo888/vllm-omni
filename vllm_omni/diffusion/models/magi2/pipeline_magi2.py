@@ -211,6 +211,8 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
         unsupported.append("use_hsdp")
     if od_config.enable_cpu_offload:
         unsupported.append("enable_cpu_offload")
+    if od_config.enable_layerwise_offload:
+        unsupported.append("enable_layerwise_offload (use distributed layerwise offload)")
     if od_config.quantization_config is not None:
         unsupported.append("quantization")
     if unsupported:
@@ -420,10 +422,6 @@ class Magi2Pipeline(
     audio_sample_rate: ClassVar[int] = MAGI2_AUDIO_SAMPLE_RATE
     dummy_run_num_frames: ClassVar[int] = 0
     _dit_modules: ClassVar[list[str]] = ["transformer"]
-    # DLO must consume the exact local snapshot already resolved (including a
-    # pinned revision) for the auxiliary components and regular weight loader.
-    _mmap_checkpoint_root_attr: ClassVar[str] = "checkpoint_root"
-    _mmap_checkpoint_subdir: ClassVar[str] = "preview"
     _encoder_modules: ClassVar[list[str]] = ["text_encoder"]
     _vae_modules: ClassVar[list[str]] = [
         "image_vae",
@@ -448,6 +446,11 @@ class Magi2Pipeline(
         if checkpoint_key.startswith(("block.", "pre_adapter.", "post_adapter.")):
             return f"transformer.{checkpoint_key}"
         return None
+
+    def _get_mmap_checkpoint_path(self) -> str:
+        """Return the transformer checkpoint selected during pipeline setup."""
+
+        return str(Path(self.checkpoint_root) / "preview")
 
     def __init__(self, od_config: OmniDiffusionConfig, **kwargs: object) -> None:
         if kwargs:
@@ -481,9 +484,7 @@ class Magi2Pipeline(
         )
         self._is_output_rank = self._parallel_group.rank == 0
         self._offload_aux_after_use = True
-        self._transformer_is_layerwise_offloaded = bool(
-            od_config.enable_layerwise_offload or od_config.enable_distributed_layerwise_offload
-        )
+        self._transformer_is_layerwise_offloaded = bool(od_config.enable_distributed_layerwise_offload)
 
         # Importing here keeps config-only model detection light.  The class is
         # an in-tree implementation; there is no dynamic remote-code import.

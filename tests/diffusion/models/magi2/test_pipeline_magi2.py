@@ -271,6 +271,12 @@ def test_native_topology_rejects_nondivisible_tensor_parallelism():
         _validate_native_topology(config)
 
 
+def test_native_topology_rejects_ordinary_layerwise_offload():
+    config = _topology_config(enable_layerwise_offload=True)
+    with pytest.raises(ValueError, match="use distributed layerwise offload"):
+        _validate_native_topology(config)
+
+
 def test_native_topology_requires_dlo_rank_local_mode():
     config = _topology_config(enable_distributed_layerwise_offload=True)
     with pytest.raises(ValueError, match="dlo-no-use-allgather"):
