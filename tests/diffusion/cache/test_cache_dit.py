@@ -227,7 +227,7 @@ def test_cosmos3_cache_dit_wraps_gen_layers(mock_cache_dit, mock_block_adapter):
     current_omni_platform.is_rocm(),
     reason="vLLM ROCm custom ops lack CPU fallback",
 )
-def test_ltx2_cache_dit_receives_audio_as_encoder(init_fake_tp_group):
+def test_ltx2_cache_dit_receives_audio_as_encoder(init_fake_tp_group, request: pytest.FixtureRequest):
     """CacheDiT Pattern_0 treats the second positional arg as encoder_hidden_states,
     which is a collision for one of the kwargs in LTX2 since we treat the audio
     hidden states as encoder_hidden_states.
@@ -266,6 +266,7 @@ def test_ltx2_cache_dit_receives_audio_as_encoder(init_fake_tp_group):
     pipeline.transformer = model
     backend = CacheDiTBackend(DiffusionCacheConfig())
     backend.enable(pipeline)
+    request.addfinalizer(lambda: backend.disable(pipeline))
     backend.refresh(pipeline, num_inference_steps=5)
 
     # Wrap call_Fn_blocks in CacheDiT so that we can verify the

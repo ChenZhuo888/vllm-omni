@@ -148,13 +148,15 @@ Cache-DiT is approximate acceleration. Keep the resident SP4 command without
 `--cache-backend` as the reference-aligned quality baseline, and validate the
 selected cache policy against that baseline for quality-sensitive workloads.
 
-The adapter lifecycle was exercised locally with rank-local DLO SP4 on four
-NVIDIA L20X GPUs using the shared T2VA command at 272p and four denoising
-steps. All four ranks installed and refreshed Cache-DiT, the request completed,
-and the output contained 125 448x256 frames at 12.5 fps plus stereo 44.1 kHz
-audio. This short run validates integration and output contracts, not quality
-or performance. A focused three-layer test separately forces a cache hit and
-verifies that only the configured front block executes on the cached step.
+The adapter lifecycle was exercised locally on four NVIDIA L20X GPUs with the
+released checkpoint, resident SP4, 272p, and four denoising steps. All ranks
+installed and refreshed Cache-DiT; the shared T2VA command completed with 125
+448x256 frames at 12.5 fps plus stereo 44.1 kHz audio. Peak reserved HBM was
+65.95 GiB per worker. The shared script's default policy uses four warmup steps,
+so this short run validates integration and output contracts, not cache speedup
+or quality. Focused three-layer checks force a cache hit under resident,
+HSDP4+SP4, and HSDP4+CFG2xSP2 execution and verify on every rank that only the
+configured front block reruns on the cached step.
 
 #### 272p variant
 

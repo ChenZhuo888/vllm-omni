@@ -844,9 +844,10 @@ def _get_magi2_transformer_block(pipeline: Any) -> torch.nn.Module:
 def enable_cache_for_magi2(pipeline: Any, cache_config: Any) -> CacheDiTEnableResult:
     """Cache only MAGI-2's repeated native transformer-layer stack.
 
-    The pre/post adapters still execute on every denoising step. MAGI-2 packs
-    CFG branches into one transformer call, so this is a non-separate-CFG
-    Pattern-3 stack even though guidance is enabled.
+    The pre/post adapters still execute on every denoising step. MAGI-2 either
+    packs both CFG branches into one transformer call or assigns one branch to
+    each CFG-parallel rank. In both layouts each rank invokes this stack once
+    per denoising step, so it remains a non-separate-CFG Pattern-3 stack.
     """
 
     transformer_block = _get_magi2_transformer_block(pipeline)

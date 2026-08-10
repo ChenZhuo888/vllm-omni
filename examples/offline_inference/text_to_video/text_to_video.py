@@ -265,7 +265,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         choices=["cache_dit"],
-        help="Cache backend for acceleration (Wan2.2). Default: None.",
+        help="Cache backend for supported diffusion pipelines. Default: None.",
     )
     parser.add_argument(
         "--enable-cache-dit-summary",
