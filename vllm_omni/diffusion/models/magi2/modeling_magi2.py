@@ -585,6 +585,12 @@ class Magi2TransformerBlock(nn.Module):
         return modality_dispatcher.inverse_permute(hidden_states)
 
 
+def _is_magi2_transformer_layer(_name: str, module: nn.Module) -> bool:
+    """Shard one Preview layer at a time under the shared FSDP2/HSDP path."""
+
+    return isinstance(module, Magi2TransformerLayer)
+
+
 class Magi2PreviewTransformer(nn.Module):
     """Native preview DiT with the released checkpoint hierarchy."""
 
@@ -592,6 +598,8 @@ class Magi2PreviewTransformer(nn.Module):
     # released checkpoint hierarchy.  Magi2TransformerBlock is iterable, so the
     # offload backends still discover each individual transformer layer.
     _layerwise_offload_blocks_attrs = ["block"]
+    _hsdp_shard_conditions = [_is_magi2_transformer_layer]
+    _hsdp_preserve_parameter_dtypes = True
     _EP_SHARDED_SUFFIXES = (
         ".moe_mlp.gate",
         ".moe_mlp.W_gate",
@@ -608,6 +616,14 @@ class Magi2PreviewTransformer(nn.Module):
         self.pre_adapter = Magi2PreAdapter(self.config)
         self.post_adapter = Magi2PostAdapter(self.config)
         self.block = Magi2TransformerBlock(self.config)
+        # SP doubles as MAGI's MoE-head parallel axis. These modules therefore
+        # contain different checkpoint slices on each SP rank and must remain
+        # rank-local while HSDP shards the replicated parameters around them.
+        self._hsdp_ignored_modules = [
+            f"block.layers.{index}.mlp.moe_mlp"
+            for index, layer in enumerate(self.block.layers)
+            if isinstance(layer.mlp, Magi2MultiHeadMoELayer)
+        ]
 
     def forward(
         self,

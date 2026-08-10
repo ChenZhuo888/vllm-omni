@@ -439,6 +439,21 @@ def _extract_peak_memory_mb(result: Any) -> float:
         return 0.0
 
 
+def _parallel_config_from_args(args: argparse.Namespace) -> DiffusionParallelConfig:
+    return DiffusionParallelConfig(
+        ulysses_degree=args.ulysses_degree,
+        ring_degree=args.ring_degree,
+        cfg_parallel_size=args.cfg_parallel_size,
+        tensor_parallel_size=args.tensor_parallel_size,
+        vae_patch_parallel_size=args.vae_patch_parallel_size,
+        use_hsdp=args.use_hsdp,
+        hsdp_shard_size=args.hsdp_shard_size,
+        hsdp_replicate_size=args.hsdp_replicate_size,
+        pipeline_parallel_size=args.pipeline_parallel_size,
+        enable_expert_parallel=args.enable_expert_parallel,
+    )
+
+
 def main():
     args = parse_args()
     model_class_name = args.model_class_name
@@ -467,15 +482,7 @@ def main():
         }
 
     # Configure parallel settings
-    parallel_config = DiffusionParallelConfig(
-        ulysses_degree=args.ulysses_degree,
-        ring_degree=args.ring_degree,
-        cfg_parallel_size=args.cfg_parallel_size,
-        tensor_parallel_size=args.tensor_parallel_size,
-        vae_patch_parallel_size=args.vae_patch_parallel_size,
-        pipeline_parallel_size=args.pipeline_parallel_size,
-        enable_expert_parallel=args.enable_expert_parallel,
-    )
+    parallel_config = _parallel_config_from_args(args)
 
     profiler_enabled = args.profiler_config is not None
 

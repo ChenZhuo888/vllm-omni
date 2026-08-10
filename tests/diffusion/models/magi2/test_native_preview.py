@@ -71,6 +71,16 @@ def _initialize_tiny_model(model: Magi2PreviewTransformer, seed: int) -> None:
                 module.router.expert_bias_ema.zero_()
 
 
+def test_hsdp_policy_shards_individual_preview_layers():
+    model = Magi2PreviewTransformer(_tiny_config(num_layers=2))
+    condition = model._hsdp_shard_conditions[0]
+
+    assert condition("block.layers.0", model.block.layers[0])
+    assert condition("block.layers.1", model.block.layers[1])
+    assert not condition("block", model.block)
+    assert not condition("pre_adapter", model.pre_adapter)
+
+
 def test_tiny_native_preview_runs_through_nested_cachedit_adapter() -> None:
     model = Magi2PreviewTransformer(_tiny_config(num_layers=3))
     _initialize_tiny_model(model, seed=11)

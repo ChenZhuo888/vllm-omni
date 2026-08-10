@@ -106,3 +106,24 @@ def test_shared_video_dlo_cli_forwards_rank_local_options(
         "dlo_use_allgather": False,
         "dlo_resident_layers": 7,
     }
+
+
+def test_shared_text_to_video_forwards_hsdp_cli(text_to_video: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(text_to_video.__file__),
+            "--ulysses-degree",
+            "3",
+            "--use-hsdp",
+            "--hsdp-shard-size",
+            "3",
+        ],
+    )
+
+    config = text_to_video._parallel_config_from_args(text_to_video.parse_args())
+
+    assert config.ulysses_degree == 3
+    assert config.use_hsdp is True
+    assert config.hsdp_shard_size == 3

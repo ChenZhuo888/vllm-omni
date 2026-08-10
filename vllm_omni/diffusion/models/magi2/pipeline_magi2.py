@@ -198,8 +198,6 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
         "pipeline_parallel_size",
         "ring_degree",
         "allgather_degree",
-        "cfg_parallel_size",
-        "vae_patch_parallel_size",
         "text_encoder_tp_size",
     ):
         value = getattr(parallel, name, 1)
@@ -207,8 +205,6 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
             unsupported.append(f"{name}={value}")
     if getattr(parallel, "enable_expert_parallel", False):
         unsupported.append("enable_expert_parallel")
-    if getattr(parallel, "use_hsdp", False):
-        unsupported.append("use_hsdp")
     if od_config.enable_cpu_offload:
         unsupported.append("enable_cpu_offload")
     if od_config.enable_layerwise_offload:
@@ -224,7 +220,11 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
     dp_size = int(getattr(parallel, "data_parallel_size", 1) or 1)
     tp_size = int(getattr(parallel, "tensor_parallel_size", 1) or 1)
     sp_size = int(getattr(parallel, "sequence_parallel_size", 1) or 1)
+    cfg_size = int(getattr(parallel, "cfg_parallel_size", 1) or 1)
+    vae_pp_size = int(getattr(parallel, "vae_patch_parallel_size", 1) or 1)
     ulysses = int(getattr(parallel, "ulysses_degree", 1) or 1)
+    if cfg_size not in (1, 2):
+        raise ValueError(f"MAGI-2 has exactly two CFG branches; cfg_parallel_size must be 1 or 2, got {cfg_size}.")
     if sp_size != ulysses:
         raise ValueError(f"MAGI-2 requires sequence_parallel_size == ulysses_degree; got {sp_size} and {ulysses}.")
 
@@ -253,15 +253,25 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
     if invalid_tp_dimensions:
         raise ValueError(f"MAGI-2 tensor_parallel_size={tp_size} does not divide: " + ", ".join(invalid_tp_dimensions))
 
-    configured_world_size = dp_size * tp_size * sp_size
+    configured_world_size = dp_size * cfg_size * tp_size * sp_size
     if dist.is_available() and dist.is_initialized() and dist.get_world_size() != configured_world_size:
         raise ValueError(
             "MAGI-2 parallel dimensions do not cover the worker world; got "
-            f"world_size={dist.get_world_size()}, DP={dp_size}, TP={tp_size}, SP={sp_size}."
+            f"world_size={dist.get_world_size()}, DP={dp_size}, CFG={cfg_size}, TP={tp_size}, SP={sp_size}."
+        )
+
+    if vae_pp_size not in (1, configured_world_size):
+        raise ValueError(
+            "MAGI-2 VAE patch parallelism currently uses the complete DiT group; "
+            f"expected vae_patch_parallel_size=1 or {configured_world_size}, got {vae_pp_size}."
         )
 
     distributed_offload = bool(od_config.enable_distributed_layerwise_offload)
     dlo_allgather = bool(getattr(od_config, "dlo_use_allgather", True))
+    if cfg_size > 1 and dp_size > 1:
+        raise ValueError("MAGI-2 CFG parallelism is not yet combined with DLO data parallelism")
+    if distributed_offload and getattr(parallel, "use_hsdp", False):
+        raise ValueError("MAGI-2 HSDP and distributed layerwise offload are alternative transformer memory modes")
     if dp_size > 1 and not distributed_offload:
         raise ValueError("MAGI-2 data parallelism currently requires distributed layerwise offload")
     if dp_size > 1 and tp_size > 1:
@@ -285,7 +295,7 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
     if configured_world_size not in {4, 8} and not allow_unsupported:
         raise ValueError(
             "MAGI-2 Preview is qualified for four or eight workers; got "
-            f"DP={dp_size}, TP={tp_size}, SP={sp_size} "
+            f"DP={dp_size}, CFG={cfg_size}, TP={tp_size}, SP={sp_size} "
             f"(world_size={configured_world_size}). Set "
             "MAGI2_ALLOW_UNSUPPORTED_TOPOLOGY=1 only for controlled bring-up."
         )
@@ -403,6 +413,18 @@ class _Magi2StagedComponent(nn.Module):
     def offload_to_cpu(self) -> None:
         self._stager.offload()
 
+    def to(self, *args: object, **kwargs: object) -> _Magi2StagedComponent:
+        """Keep lifecycle-managed auxiliaries on the host between stages.
+
+        The generic HSDP loader places discovered non-DiT components on the
+        execution device after sharding. MAGI-2 owns those components through
+        ``PinnedModuleStager`` instead, so a direct placement request must not
+        make Qwen and all three codecs resident together.
+        """
+
+        del args, kwargs
+        return self
+
     def forward(self, *args: object, **kwargs: object) -> object:
         return self.module(*args, **kwargs)
 
@@ -485,6 +507,8 @@ class Magi2Pipeline(
         self._is_output_rank = self._parallel_group.rank == 0
         self._offload_aux_after_use = True
         self._transformer_is_layerwise_offloaded = bool(od_config.enable_distributed_layerwise_offload)
+        self._transformer_is_hsdp = bool(getattr(od_config.parallel_config, "use_hsdp", False))
+        self._distributed_video_decode = int(od_config.parallel_config.vae_patch_parallel_size) > 1
 
         # Importing here keeps config-only model detection light.  The class is
         # an in-tree implementation; there is no dynamic remote-code import.
@@ -511,11 +535,11 @@ class Magi2Pipeline(
         )
 
         root = Path(self.checkpoint_root)
-        if self._is_output_rank:
-            # These components execute one at a time on the output rank.  They
-            # start on CPU so construction never competes with DiT allocation;
-            # `_component_on_device` controls the round trip explicitly.
-            with torch.device("cpu"):
+        # Auxiliaries start on CPU and are staged one at a time. Distributed
+        # TurboVAE decode is the only case that materializes a codec on every
+        # rank; Qwen, image VAE, and Oobleck remain output-rank-only.
+        with torch.device("cpu"):
+            if self._is_output_rank:
                 text_encoder: nn.Module = Magi2Qwen35TextEncoder(
                     str(root / "text_encoder"),
                     dtype=self.dtype,
@@ -527,24 +551,25 @@ class Magi2Pipeline(
                     dtype=torch.float32,
                     device="cpu",
                 )
+                audio_decoder: nn.Module = Magi2AudioDecoder(
+                    root / "stable-audio-open-1.0",
+                    device="cpu",
+                    dtype=torch.float32,
+                )
+            else:
+                text_encoder = nn.Identity()
+                image_vae = nn.Identity()
+                audio_decoder = nn.Identity()
+
+            if self._is_output_rank or self._distributed_video_decode:
                 video_decoder: nn.Module = Magi2TurboVAEDecoder(
                     root / "turbo_vae" / "TurboV3-Wan22-TinyShallow_7_7.json",
                     root / "turbo_vae" / "checkpoint.ckpt",
                     device="cpu",
                     dtype=self.dtype,
                 )
-                audio_decoder: nn.Module = Magi2AudioDecoder(
-                    root / "stable-audio-open-1.0",
-                    device="cpu",
-                    dtype=torch.float32,
-                )
-        else:
-            # Keep component discovery structurally consistent without loading
-            # redundant 27B/decoder weights on non-output ranks.
-            text_encoder = nn.Identity()
-            image_vae = nn.Identity()
-            video_decoder = nn.Identity()
-            audio_decoder = nn.Identity()
+            else:
+                video_decoder = nn.Identity()
 
         pin_memory = bool(getattr(od_config, "pin_cpu_memory", True))
         self.text_encoder = _Magi2StagedComponent(
@@ -590,6 +615,12 @@ class Magi2Pipeline(
             enable_diffusion_pipeline_profiler=bool(getattr(od_config, "enable_diffusion_pipeline_profiler", False)),
         )
 
+    @property
+    def vae(self) -> nn.Module:
+        """Expose TurboVAE through the shared distributed-VAE contract."""
+
+        return self.video_decoder.module
+
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -626,7 +657,11 @@ class Magi2Pipeline(
         prompt encodes and restore it before any model collective begins.
         """
 
-        stage_transformer = self._is_output_rank and not self._transformer_is_layerwise_offloaded
+        stage_transformer = (
+            self._is_output_rank
+            and not self._transformer_is_layerwise_offloaded
+            and not getattr(self, "_transformer_is_hsdp", False)
+        )
         if stage_transformer:
             self.transformer.to("cpu")
             torch.accelerator.empty_cache()
@@ -740,13 +775,16 @@ class Magi2Pipeline(
         return self._broadcast_tensor(special)
 
     def _decode_video(self, latent: torch.Tensor) -> np.ndarray | None:
-        if not self._is_output_rank:
+        distributed_video_decode = getattr(self, "_distributed_video_decode", False)
+        if not self._is_output_rank and not distributed_video_decode:
             return None
         with self._component_on_device(self.video_decoder) as video_decoder:
             decoded = video_decoder.decode(
                 latent.to(self.device_str, dtype=self.dtype),
                 output_offload=True,
             )
+        if not self._is_output_rank:
+            return None
         if decoded.ndim != 5:
             raise RuntimeError(f"TurboVAE returned unexpected shape {tuple(decoded.shape)}")
         video = decoded[0].float().mul_(0.5).add_(0.5).clamp_(0, 1)

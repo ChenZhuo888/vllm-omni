@@ -219,6 +219,41 @@ divisibility. The TP and SP layouts are deterministic within a fixed topology,
 but BF16 collective order can produce topology-dependent numeric differences;
 use SP4 when fidelity against the reference-aligned baseline is the priority.
 
+#### HSDP, CFG parallelism, and distributed TurboVAE decode
+
+The native pipeline also composes the shared HSDP, two-branch CFG, and VAE
+parallel primitives with MAGI-2's Ulysses path. Add the relevant flags to the
+shared T2VA or I2VA command:
+
+| Four-worker layout | Additional flags |
+|---|---|
+| HSDP4 + SP4 | `--ulysses-degree 4 --use-hsdp --hsdp-shard-size 4` |
+| CFG2 x SP2 | `--ulysses-degree 2 --cfg-parallel-size 2` |
+| HSDP4 + CFG2 x SP2 | `--ulysses-degree 2 --cfg-parallel-size 2 --use-hsdp --hsdp-shard-size 4` |
+| TurboVAE tile decode across four workers | `--vae-patch-parallel-size 4 --vae-use-tiling` |
+
+HSDP uses FSDP2 for the dense transformer parameters while preserving MAGI's
+already-SP-sharded MoE parameters. It cannot be combined with TP or DLO. CFG
+parallelism assigns the positive and negative branches to separate CFG ranks
+and preserves MAGI-2's distinct video/audio guidance, dynamic CFG, skimming,
+and rescaling rules. `CFG2 x SP4` requires eight workers; use `CFG2 x SP2` on a
+four-worker host.
+
+Local qualification covered the real four-rank FSDP2 + SP4 collective path and
+the combined HSDP4 + CFG2 x SP2 path with small native transformers. Because
+one of the four GPUs was occupied by an unrelated live service, the released
+checkpoint was exercised with HSDP3 + SP3 on the other three GPUs. Its
+deterministic one-step 272p output was byte-identical to resident SP3, including
+125 video frames and stereo audio. This SP3 run is bring-up evidence, not a
+supported deployment recommendation.
+
+TurboVAE patch parallelism distributes the decoder's exact temporal tile
+chunks across the complete worker group; it does not introduce approximate
+spatial crops. A released-checkpoint 540p PP4 decode matched resident decode
+exactly (`max_abs_error=0`, identical SHA-256). Audio decode remains on the
+output rank. VAE parallelism currently requires tile mode and a parallel size
+equal to the complete DiT worker count.
+
 #### Distributed layerwise offload
 
 Distributed layerwise offload (DLO) streams the 40 Preview transformer blocks

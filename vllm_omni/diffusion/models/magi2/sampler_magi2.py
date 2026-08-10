@@ -15,11 +15,14 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
 
+from vllm_omni.diffusion.distributed.cfg_parallel import CFGParallelMixin
+from vllm_omni.diffusion.distributed.parallel_state import get_classifier_free_guidance_world_size
 from vllm_omni.diffusion.models.schedulers import FlowUniPCMultistepScheduler
 
 from .preview_data_proxy import Magi2DataProxy, ModelInput
@@ -117,7 +120,7 @@ def build_magi2_preview_schedulers(
     return video_scheduler, audio_scheduler
 
 
-class Magi2PreviewSampler:
+class Magi2PreviewSampler(CFGParallelMixin):
     """Run MAGI-2 Preview's joint video/audio denoising loop."""
 
     def __init__(
@@ -141,6 +144,11 @@ class Magi2PreviewSampler:
         if not isinstance(model_output, torch.Tensor):
             raise TypeError(f"MAGI-2 preview transformer must return a tensor, got {type(model_output)!r}")
         return self.data_proxy.process_output(model_output)
+
+    def predict_noise(self, model_input: ModelInput) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one conditional or unconditional branch for shared CFG dispatch."""
+
+        return self.forward(model_input)
 
     @torch.inference_mode()
     def sample(self, sampler_input: SamplerInput) -> tuple[torch.Tensor, torch.Tensor]:
@@ -179,18 +187,45 @@ class Magi2PreviewSampler:
                 t=timestep,
                 cfg_config=sampler_input.cfg_config,
             )
-            model_pred = self.forward(model_input)
-            latent, audio_latent, _, _ = self.step(
-                model_pred,
-                latent,
-                audio_latent,
-                video_cfg,
-                audio_cfg,
-                sampler_input.video_scheduler,
-                sampler_input.audio_scheduler,
-                timestep,
-                cfg_config=sampler_input.cfg_config,
-            )
+            if get_classifier_free_guidance_world_size() > 1:
+                positive_input, negative_input = self._split_cfg_model_input(model_input)
+                guided = self.predict_noise_maybe_with_cfg(
+                    do_true_cfg=True,
+                    true_cfg_scale=1.0,
+                    positive_kwargs={"model_input": positive_input},
+                    negative_kwargs={"model_input": negative_input},
+                    cfg_normalize=False,
+                    kwargs={
+                        "video_txt_guidance_scale": video_cfg,
+                        "audio_txt_guidance_scale": audio_cfg,
+                        "cfg_config": sampler_input.cfg_config,
+                        "latent": latent,
+                        "audio_latent": audio_latent,
+                    },
+                )
+                if not isinstance(guided, tuple) or len(guided) != 2:
+                    raise RuntimeError("MAGI-2 CFG parallel combine must return video and audio predictions")
+                latent, audio_latent = self._step_guided(
+                    guided,
+                    latent,
+                    audio_latent,
+                    sampler_input.video_scheduler,
+                    sampler_input.audio_scheduler,
+                    timestep,
+                )
+            else:
+                model_pred = self.forward(model_input)
+                latent, audio_latent, _, _ = self.step(
+                    model_pred,
+                    latent,
+                    audio_latent,
+                    video_cfg,
+                    audio_cfg,
+                    sampler_input.video_scheduler,
+                    sampler_input.audio_scheduler,
+                    timestep,
+                    cfg_config=sampler_input.cfg_config,
+                )
 
         return latent, audio_latent
 
@@ -312,6 +347,51 @@ class Magi2PreviewSampler:
             ref_image_feat_len=ref_image_feat_len_cfg,
             ref_image_special_token_embedding=ref_image_special_tokens_cfg,
         )
+
+    @staticmethod
+    def _split_cfg_model_input(model_input: ModelInput) -> tuple[ModelInput, ModelInput]:
+        """Split the packed positive/negative batch for CFG rank dispatch."""
+
+        batch = model_input.x_t.shape[0]
+        if batch % 2:
+            raise ValueError("MAGI-2 CFG model input must contain equal positive and negative halves")
+        half = batch // 2
+
+        def split(value: torch.Tensor | Sequence[int] | None) -> tuple[torch.Tensor | Sequence[int] | None, ...]:
+            if value is None:
+                return None, None
+            if isinstance(value, torch.Tensor):
+                if value.ndim == 0 or value.shape[0] != batch:
+                    raise ValueError("MAGI-2 CFG tensor fields must use the packed CFG batch dimension")
+                return value[:half], value[half:]
+            if len(value) != batch:
+                raise ValueError("MAGI-2 CFG sequence fields must use the packed CFG batch dimension")
+            return value[:half], value[half:]
+
+        field_pairs = {
+            name: split(getattr(model_input, name))
+            for name in (
+                "x_t",
+                "audio_x_t",
+                "audio_feat_len",
+                "txt_feat",
+                "txt_feat_len",
+                "t",
+                "ref_audio_feat",
+                "ref_audio_feat_len",
+                "ref_video_feat",
+                "ref_video_feat_len",
+                "per_token_video_t",
+                "per_token_audio_t",
+                "ref_image_feat",
+                "ref_image_feat_len",
+                "ref_image_special_token_embedding",
+            )
+        }
+        branches = []
+        for branch in range(2):
+            branches.append(ModelInput(**{name: pair[branch] for name, pair in field_pairs.items()}))
+        return branches[0], branches[1]
 
     @staticmethod
     def _prepare_ref_image_cfg(
@@ -513,6 +593,52 @@ class Magi2PreviewSampler:
         else:
             cfg_audio = None
         return cfg_video, cfg_audio
+
+    def combine_cfg_noise(
+        self,
+        positive_noise_pred: torch.Tensor | tuple[torch.Tensor, ...],
+        negative_noise_pred: torch.Tensor | tuple[torch.Tensor, ...],
+        true_cfg_scale: float,
+        cfg_normalize: bool = False,
+        kwargs: dict[str, Any] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Preserve MAGI-2's dual-modality guidance under shared CFG dispatch."""
+
+        del true_cfg_scale, cfg_normalize
+        if not isinstance(positive_noise_pred, tuple) or not isinstance(negative_noise_pred, tuple):
+            raise TypeError("MAGI-2 CFG predictions must contain video and audio tensors")
+        if len(positive_noise_pred) != 2 or len(negative_noise_pred) != 2:
+            raise ValueError("MAGI-2 CFG predictions must contain exactly two tensors")
+        if kwargs is None:
+            raise ValueError("MAGI-2 CFG combine requires guidance and latent context")
+        cfg_video, cfg_audio = self.cfg_velocity(
+            (
+                torch.cat((positive_noise_pred[0], negative_noise_pred[0]), dim=0),
+                torch.cat((positive_noise_pred[1], negative_noise_pred[1]), dim=0),
+            ),
+            kwargs["video_txt_guidance_scale"],
+            kwargs["audio_txt_guidance_scale"],
+            kwargs.get("cfg_config"),
+            kwargs.get("latent"),
+            kwargs.get("audio_latent"),
+        )
+        if cfg_video is None or cfg_audio is None:
+            raise RuntimeError("MAGI-2 Preview must produce both video and audio CFG predictions")
+        return cfg_video, cfg_audio
+
+    @staticmethod
+    def _step_guided(
+        guided_output: tuple[torch.Tensor, torch.Tensor],
+        latent: torch.Tensor,
+        audio_latent: torch.Tensor,
+        video_scheduler: SchedulerMixin,
+        audio_scheduler: SchedulerMixin,
+        t: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cfg_video, cfg_audio = guided_output
+        latent = video_scheduler.step(cfg_video, t, latent, return_dict=False)[0]
+        audio_latent = audio_scheduler.step(cfg_audio, t, audio_latent, return_dict=False)[0]
+        return latent, audio_latent
 
     def step(
         self,

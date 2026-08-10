@@ -24,6 +24,8 @@ from vllm_omni.diffusion.models.magi2.pipeline_magi2 import (
     _resolve_checkpoint_root,
     _validate_native_topology,
 )
+from vllm_omni.diffusion.models.magi2.preview_data_proxy import Magi2DataProxy
+from vllm_omni.diffusion.models.magi2.sampler_magi2 import CFGConfig, Magi2PreviewSampler
 from vllm_omni.diffusion.registry import DiffusionModelRegistry
 from vllm_omni.diffusion.utils.hf_utils import is_diffusion_model
 from vllm_omni.errors import OmniClientError
@@ -283,6 +285,78 @@ def test_native_topology_requires_dlo_rank_local_mode():
         _validate_native_topology(config)
     config.dlo_use_allgather = False
     _validate_native_topology(config)
+
+
+def test_native_topology_accepts_four_device_hsdp_cfg_and_vae_layouts():
+    _validate_native_topology(
+        _topology_config(
+            sequence_parallel_size=4,
+            ulysses_degree=4,
+            use_hsdp=True,
+        )
+    )
+    _validate_native_topology(
+        _topology_config(
+            sequence_parallel_size=2,
+            ulysses_degree=2,
+            cfg_parallel_size=2,
+        )
+    )
+    _validate_native_topology(
+        _topology_config(
+            sequence_parallel_size=4,
+            ulysses_degree=4,
+            vae_patch_parallel_size=4,
+        )
+    )
+
+
+def test_cfg_parallel_branch_adapter_preserves_packed_cfg_math():
+    sampler = Magi2PreviewSampler(nn.Identity(), Magi2DataProxy(), device="cpu", dtype=torch.float32)
+    latent = torch.arange(8, dtype=torch.float32).reshape(1, 2, 2, 1, 2)
+    audio_latent = torch.arange(6, dtype=torch.float32).reshape(1, 3, 2)
+    positive_text = torch.ones(1, 3, 4)
+    negative_text = torch.full((1, 2, 4), -1.0)
+    packed = sampler.prepare_model_input(
+        latent=latent,
+        audio_latent=audio_latent,
+        txt_feat=positive_text,
+        null_txt_feat=negative_text,
+        t=torch.tensor(500.0),
+        cfg_config=CFGConfig(),
+    )
+    positive, negative = sampler._split_cfg_model_input(packed)
+
+    assert positive.x_t.shape[0] == negative.x_t.shape[0] == 1
+    torch.testing.assert_close(positive.txt_feat[:, :3], positive_text)
+    torch.testing.assert_close(negative.txt_feat[:, :2], negative_text)
+
+    video_pos = torch.full_like(latent, 3.0)
+    video_neg = torch.full_like(latent, 1.0)
+    audio_pos = torch.full_like(audio_latent, 4.0)
+    audio_neg = torch.full_like(audio_latent, 2.0)
+    expected = sampler.cfg_velocity(
+        (torch.cat((video_pos, video_neg)), torch.cat((audio_pos, audio_neg))),
+        5.0,
+        7.0,
+        CFGConfig(),
+        latent,
+        audio_latent,
+    )
+    actual = sampler.combine_cfg_noise(
+        (video_pos, audio_pos),
+        (video_neg, audio_neg),
+        1.0,
+        kwargs={
+            "video_txt_guidance_scale": 5.0,
+            "audio_txt_guidance_scale": 7.0,
+            "cfg_config": CFGConfig(),
+            "latent": latent,
+            "audio_latent": audio_latent,
+        },
+    )
+    torch.testing.assert_close(actual[0], expected[0])
+    torch.testing.assert_close(actual[1], expected[1])
 
 
 def test_decode_audio_preserves_batch_for_released_preview_shape(monkeypatch):

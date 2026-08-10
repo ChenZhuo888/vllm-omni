@@ -16,8 +16,16 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from einops import rearrange
+
+from vllm_omni.diffusion.distributed.autoencoders.distributed_vae_executor import (
+    DistributedOperator,
+    DistributedVaeMixin,
+    GridSpec,
+    TileTask,
+)
 
 _WAN22_LATENT_MEAN = (
     -0.2289,
@@ -399,7 +407,7 @@ def extract_turbo_decoder_state_dict(checkpoint: Mapping[str, Any]) -> dict[str,
     return result
 
 
-class Magi2TurboVAEDecoder(nn.Module):
+class Magi2TurboVAEDecoder(nn.Module, DistributedVaeMixin):
     """Load and run MAGI-2's default distilled video decoder."""
 
     def __init__(
@@ -451,15 +459,29 @@ class Magi2TurboVAEDecoder(nn.Module):
         state = extract_turbo_decoder_state_dict(checkpoint)
         self.load_state_dict(state, strict=True)
         self.eval().requires_grad_(False)
+        self.use_tiling = False
+        self.use_slicing = False
+        if dist.is_available() and dist.is_initialized():
+            self.init_distributed()
 
-    @torch.inference_mode()
-    def decode(self, z: torch.Tensor, *, output_offload: bool = False) -> torch.Tensor:
+    def set_parallel_size(self, parallel_size: int, mode: str = "tile") -> None:
+        if mode != "tile":
+            raise ValueError(f"MAGI-2 TurboVAE supports temporal tile parallelism only, got {mode!r}")
+        if not hasattr(self, "distributed_executor"):
+            if parallel_size > 1:
+                raise RuntimeError("TurboVAE patch parallelism requires initialized torch.distributed")
+            return
+        super().set_parallel_size(parallel_size, mode=mode)
+
+    def is_distributed_enabled(self) -> bool:
+        return hasattr(self, "distributed_executor") and super().is_distributed_enabled()
+
+    def _prepare_latent(self, z: torch.Tensor) -> tuple[torch.Tensor, int]:
         dtype = z.dtype
         z = z * self.latent_std.view(1, self.z_dim, 1, 1, 1) + self.latent_mean.view(1, self.z_dim, 1, 1, 1)
         z = z.to(dtype)
         first = self.first_chunk_size
         step = self.step_size
-        overlap = self.temporal_compression_ratio
         frames = z.shape[2]
         if frames < first:
             padding = first - frames
@@ -469,27 +491,85 @@ class Magi2TurboVAEDecoder(nn.Module):
             padding = 0
         if padding:
             z = torch.cat([z, z[:, :, -1:].repeat(1, 1, padding, 1, 1)], dim=2)
-        frames = z.shape[2]
+        return z, padding
 
-        chunks = []
+    def _chunk_tasks(self, z: torch.Tensor, padding: int) -> tuple[list[TileTask], GridSpec]:
+        first = self.first_chunk_size
+        step = self.step_size
+        overlap = self.temporal_compression_ratio
+        frames = z.shape[2]
+        descriptors: list[tuple[int, int, bool, int, int]] = []
         if frames == first:
-            output = self.decoder(z, is_first_chunk=True)
-            chunks.append(output.cpu() if output_offload else output)
+            descriptors.append((0, frames, True, 0, 0))
         else:
-            output = self.decoder(z[:, :, : first + 1], is_first_chunk=True)
-            output = output[:, :, :-overlap]
-            chunks.append(output.cpu() if output_offload else output)
+            descriptors.append((0, first + 1, True, 0, overlap))
             for index in range(first, frames, step):
                 last = index + step == frames
-                left = index - 1
-                right = index + step if last else index + step + 1
-                output = self.decoder(z[:, :, left:right], is_first_chunk=False)
-                output = output[:, :, overlap:] if last else output[:, :, overlap:-overlap]
-                chunks.append(output.cpu() if output_offload else output)
-        output = torch.cat(chunks, dim=2)
+                descriptors.append(
+                    (
+                        index - 1,
+                        index + step if last else index + step + 1,
+                        False,
+                        overlap,
+                        0 if last else overlap,
+                    )
+                )
+
+        tasks = [
+            TileTask(
+                tile_id=chunk_index,
+                grid_coord=(chunk_index, int(is_first), crop_left, crop_right),
+                tensor=z[:, :, left:right],
+                workload=(right - left) * z.shape[3] * z.shape[4],
+            )
+            for chunk_index, (left, right, is_first, crop_left, crop_right) in enumerate(descriptors)
+        ]
+        return tasks, GridSpec(
+            split_dims=(2,),
+            grid_shape=(len(tasks),),
+            tile_spec={"padding": padding},
+            output_dtype=z.dtype,
+        )
+
+    def _decode_chunk(self, task: TileTask) -> torch.Tensor:
+        _index, is_first, crop_left, crop_right = task.grid_coord
+        assert isinstance(task.tensor, torch.Tensor)
+        output = self.decoder(task.tensor, is_first_chunk=bool(is_first))
+        right = output.shape[2] - crop_right if crop_right else output.shape[2]
+        return output[:, :, crop_left:right]
+
+    def _merge_chunks(
+        self,
+        chunks: dict[tuple[int, ...], torch.Tensor],
+        grid_spec: GridSpec,
+    ) -> torch.Tensor:
+        output = torch.cat([tensor for _coord, tensor in sorted(chunks.items())], dim=2)
+        padding = int(grid_spec.tile_spec["padding"])
         if padding:
             output = output[:, :, : -padding * self.temporal_compression_ratio]
         return output
+
+    @torch.inference_mode()
+    def decode(self, z: torch.Tensor, *, output_offload: bool = False) -> torch.Tensor:
+        z, padding = self._prepare_latent(z)
+        tasks, grid_spec = self._chunk_tasks(z, padding)
+        if self.is_distributed_enabled():
+            output = self.distributed_executor.execute(
+                z,
+                DistributedOperator(
+                    split=lambda _z: (tasks, grid_spec),
+                    exec=self._decode_chunk,
+                    merge=self._merge_chunks,
+                ),
+                broadcast_result=False,
+            )
+            return output.cpu() if output_offload and output.numel() else output
+
+        chunks = []
+        for task in tasks:
+            tensor = self._decode_chunk(task)
+            chunks.append((task.grid_coord, tensor.cpu() if output_offload else tensor))
+        return self._merge_chunks(dict(chunks), grid_spec)
 
     forward = decode
 
