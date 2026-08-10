@@ -205,10 +205,6 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
             unsupported.append(f"{name}={value}")
     if getattr(parallel, "enable_expert_parallel", False):
         unsupported.append("enable_expert_parallel")
-    if od_config.enable_cpu_offload:
-        unsupported.append("enable_cpu_offload")
-    if od_config.enable_layerwise_offload:
-        unsupported.append("enable_layerwise_offload (use distributed layerwise offload)")
     if od_config.quantization_config is not None:
         unsupported.append("quantization")
     if unsupported:
@@ -254,6 +250,26 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
         raise ValueError(f"MAGI-2 tensor_parallel_size={tp_size} does not divide: " + ", ".join(invalid_tp_dimensions))
 
     configured_world_size = dp_size * cfg_size * tp_size * sp_size
+    cpu_offload = bool(od_config.enable_cpu_offload)
+    layerwise_offload = bool(od_config.enable_layerwise_offload)
+    distributed_offload = bool(od_config.enable_distributed_layerwise_offload)
+    if cpu_offload and not layerwise_offload:
+        raise ValueError(
+            "MAGI-2 already stages its auxiliary components from CPU, while "
+            "the complete Preview transformer cannot fit on one qualified GPU. "
+            "Combine --enable-cpu-offload with --enable-layerwise-offload, or "
+            "use --enable-layerwise-offload alone."
+        )
+    if layerwise_offload and distributed_offload:
+        raise ValueError("MAGI-2 ordinary and distributed layerwise offload are mutually exclusive")
+    if layerwise_offload and configured_world_size != 1:
+        raise ValueError(
+            "MAGI-2 ordinary layerwise offload is a single-worker path; "
+            f"got world_size={configured_world_size}. Use distributed layerwise "
+            "offload for multi-worker layouts."
+        )
+    if layerwise_offload and getattr(parallel, "use_hsdp", False):
+        raise ValueError("MAGI-2 ordinary layerwise offload cannot be combined with HSDP")
     if dist.is_available() and dist.is_initialized() and dist.get_world_size() != configured_world_size:
         raise ValueError(
             "MAGI-2 parallel dimensions do not cover the worker world; got "
@@ -266,7 +282,6 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
             f"expected vae_patch_parallel_size=1 or {configured_world_size}, got {vae_pp_size}."
         )
 
-    distributed_offload = bool(od_config.enable_distributed_layerwise_offload)
     dlo_allgather = bool(getattr(od_config, "dlo_use_allgather", True))
     if cfg_size > 1 and dp_size > 1:
         raise ValueError("MAGI-2 CFG parallelism is not yet combined with DLO data parallelism")
@@ -292,9 +307,11 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
             "MAGI2_ALLOW_UNSUPPORTED_TOPOLOGY",
         )
     )
-    if configured_world_size not in {4, 8} and not allow_unsupported:
+    supported_single_worker = layerwise_offload and configured_world_size == 1
+    if configured_world_size not in {4, 8} and not supported_single_worker and not allow_unsupported:
         raise ValueError(
-            "MAGI-2 Preview is qualified for four or eight workers; got "
+            "MAGI-2 Preview is qualified for one worker with ordinary layerwise "
+            "offload, or four/eight workers; got "
             f"DP={dp_size}, CFG={cfg_size}, TP={tp_size}, SP={sp_size} "
             f"(world_size={configured_world_size}). Set "
             "MAGI2_ALLOW_UNSUPPORTED_TOPOLOGY=1 only for controlled bring-up."
@@ -506,7 +523,9 @@ class Magi2Pipeline(
         )
         self._is_output_rank = self._parallel_group.rank == 0
         self._offload_aux_after_use = True
-        self._transformer_is_layerwise_offloaded = bool(od_config.enable_distributed_layerwise_offload)
+        self._transformer_is_layerwise_offloaded = bool(
+            od_config.enable_layerwise_offload or od_config.enable_distributed_layerwise_offload
+        )
         self._transformer_is_hsdp = bool(getattr(od_config.parallel_config, "use_hsdp", False))
         self._distributed_video_decode = int(od_config.parallel_config.vae_patch_parallel_size) > 1
 

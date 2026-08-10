@@ -117,5 +117,6 @@ per-architecture serving commands.
 
 <sup>2</sup> MAGI-2 Preview runs through the native vLLM-Omni pipeline. The reference-aligned default is resident
 SP4; native TP4 and TP2SP2 plus DLO DP4, DP2SP2, and rank-local SP4 are supported on four GPUs. Compatible
-eight-worker configurations pass topology validation but were not locally exercised for this integration. See the
+single-worker execution uses ordinary layerwise offload with native auxiliary CPU staging. Compatible eight-worker
+configurations pass topology validation but were not locally exercised for this integration. See the
 [`MAGI-2 Preview recipe`](https://github.com/vllm-project/vllm-omni/tree/main/recipes/SandAI/MAGI-2-preview.md).

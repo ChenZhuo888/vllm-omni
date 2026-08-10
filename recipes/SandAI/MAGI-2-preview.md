@@ -125,6 +125,38 @@ python examples/offline_inference/image_to_video/image_to_video.py \
 For a load-and-kernel smoke test, change `--num-inference-steps 100` to `1`.
 The one-step form is not a quality evaluation.
 
+#### One-GPU CPU and layerwise offload
+
+MAGI-2 always stages Qwen, the image VAE, TurboVAE, and Oobleck from pinned
+CPU memory only for the phase that uses each component. The complete Preview
+transformer is too large for one qualified GPU, so standalone whole-model
+`--enable-cpu-offload` is rejected. On one worker, add ordinary layerwise
+offload so only the current and prefetched transformer blocks occupy HBM:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+
+python examples/offline_inference/text_to_video/text_to_video.py \
+  --model "$MAGI2_CKPT_ROOT" \
+  --model-class-name Magi2Pipeline \
+  --prompt "A red fox walks through fresh snow while wind moves the pine branches." \
+  --height 256 --width 448 --num-frames 125 \
+  --num-inference-steps 4 --fps 12.5 \
+  --enable-cpu-offload --enable-layerwise-offload \
+  --extra-body '{"seconds":10,"resolution":"272p"}' \
+  --output magi2_272p_cpu_layerwise.mp4
+```
+
+The shared offloader gives layerwise mode priority; MAGI-2's native component
+stagers continue to own the auxiliary CPU lifecycle. A released-checkpoint
+four-step run on one NVIDIA L20X produced 125 448x256 frames at 12.5 fps and
+stereo 44.1 kHz audio. It used 49.29 GiB peak reserved HBM and 371.97 GiB peak
+host PSS. The monitored run took 42.55 seconds E2E: 10.87 seconds prompt
+encoding, 25.05 seconds sampling, 4.16 seconds video decode, and 1.96 seconds
+audio decode. Host PSS sampling adds observable CPU overhead, so these timings
+are qualification evidence rather than a latency recommendation. Resident SP4
+remains the default when four GPUs are available.
+
 #### Cache-DiT acceleration
 
 MAGI-2 supports the shared Cache-DiT backend. Add these flags to either shared
@@ -242,12 +274,13 @@ and rescaling rules. `CFG2 x SP4` requires eight workers; use `CFG2 x SP2` on a
 four-worker host.
 
 Local qualification covered the real four-rank FSDP2 + SP4 collective path and
-the combined HSDP4 + CFG2 x SP2 path with small native transformers. Because
-one of the four GPUs was occupied by an unrelated live service, the released
-checkpoint was exercised with HSDP3 + SP3 on the other three GPUs. Its
-deterministic one-step 272p output was byte-identical to resident SP3, including
-125 video frames and stereo audio. This SP3 run is bring-up evidence, not a
-supported deployment recommendation.
+the combined HSDP4 + CFG2 x SP2 path with small native transformers. Both
+matched their single-rank oracles within the documented BF16 tolerance. A
+released-checkpoint HSDP3 + SP3 bring-up also produced byte-identical output to
+resident SP3, but three-worker execution is not a supported deployment layout.
+Released-checkpoint HSDP4 E2E remains follow-up evidence; resident SP4 stays the
+recommended default because HSDP materialization already showed higher peak
+HBM during bring-up.
 
 TurboVAE patch parallelism distributes the decoder's exact temporal tile
 chunks across the complete worker group; it does not introduce approximate
@@ -363,13 +396,15 @@ Use `--image` in the shared I2V entrypoint rather than the lower-level
   request batching is not supported.
 - Only the published 10-second, 125-frame, 12.5-fps Preview workflow is supported.
 - Native generation is limited to the `272p` and `540p` tiers.
-- The worker world must contain 4 or 8 GPUs. Parallel dimensions must cover the
-  full worker world and pass the model-dimension divisibility checks.
+- The worker world must contain one GPU with ordinary layerwise offload, or 4/8
+  GPUs for parallel execution. Parallel dimensions must cover the full worker
+  world and pass the model-dimension divisibility checks.
 - Data parallelism requires DLO. DLO data-parallel replicas require TP=1, and
   DLO AllGather requires DP greater than 1.
-- HSDP, cache acceleration, quantization, generic module CPU offload, CFG
-  parallelism, ring sequence parallelism, pipeline parallelism, and VAE patch
-  parallelism are not supported for this pipeline.
+- Quantization, standalone module-level CPU offload, ring sequence parallelism,
+  and pipeline parallelism are not supported. Single-worker ordinary layerwise
+  offload, HSDP, Cache-DiT, two-way CFG parallelism, and TurboVAE tile
+  parallelism use the qualified paths documented above.
 - SP-only DLO requires `--dlo-no-use-allgather`; SP ranks own different
   MoE-head shards and cannot form a DLO AllGather group with one another.
 - Full 100-step 540p T2VA and I2VA were qualified only with four-device

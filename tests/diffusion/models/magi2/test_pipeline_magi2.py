@@ -274,9 +274,18 @@ def test_native_topology_rejects_nondivisible_tensor_parallelism():
         _validate_native_topology(config)
 
 
-def test_native_topology_rejects_ordinary_layerwise_offload():
-    config = _topology_config(enable_layerwise_offload=True)
-    with pytest.raises(ValueError, match="use distributed layerwise offload"):
+def test_native_topology_accepts_single_device_layerwise_with_cpu_staging():
+    config = _topology_config(
+        enable_layerwise_offload=True,
+        additional_config={},
+    )
+    _validate_native_topology(config)
+
+    config.enable_cpu_offload = True
+    _validate_native_topology(config)
+
+    config.enable_layerwise_offload = False
+    with pytest.raises(ValueError, match="Combine --enable-cpu-offload"):
         _validate_native_topology(config)
 
 
