@@ -274,7 +274,9 @@ class Magi2PreviewSampler(CFGParallelMixin):
         ref_audio_feat_len = ref_audio_feat.shape[1]
 
         if ref_video_feat is None:
-            ref_video_feat = torch.empty_like(latent)
+            # Preserve the 5-D ABI without allocating or reading a full-size
+            # placeholder that the zero reference length excludes downstream.
+            ref_video_feat = latent[:, :, :0]
             ref_video_feat_len = 0
         else:
             if ref_video_feat.ndim != 5 or ref_video_feat.shape[0] != batch_size:

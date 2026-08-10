@@ -62,11 +62,6 @@ class Magi2PreviewDataProxyConfig:
             raise ValueError("time_channel_dim must be non-negative")
 
 
-# Keep the short reference name available while making the public native name
-# unambiguous to callers that also construct model/generation configs.
-DataProxyConfig = Magi2PreviewDataProxyConfig
-
-
 @dataclass
 class ModelInput:
     """Unpacked tensors for one native preview-transformer invocation."""
@@ -654,7 +649,6 @@ class Magi2DataProxy:
 
 
 __all__ = [
-    "DataProxyConfig",
     "Magi2DataProxy",
     "Magi2PreviewDataProxyConfig",
     "Modality",

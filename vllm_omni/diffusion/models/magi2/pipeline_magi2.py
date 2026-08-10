@@ -301,14 +301,12 @@ def _validate_native_topology(od_config: OmniDiffusionConfig) -> None:
         )
 
 
-def _seed_request(seed: int, deterministic: bool) -> None:
+def _seed_request(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed % (2**32))
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    if deterministic:
-        torch.use_deterministic_algorithms(True)
 
 
 def _resolve_request_seed(sampling: object) -> int:
@@ -378,8 +376,7 @@ def _magi2_post_process(output: object) -> object:
     return dict(output) if isinstance(output, Mapping) else output
 
 
-def get_magi2_post_process_func(od_config: OmniDiffusionConfig):
-    del od_config
+def get_magi2_post_process_func(_od_config: OmniDiffusionConfig):
     return _magi2_post_process
 
 
@@ -413,7 +410,7 @@ class _Magi2StagedComponent(nn.Module):
     def offload_to_cpu(self) -> None:
         self._stager.offload()
 
-    def to(self, *args: object, **kwargs: object) -> _Magi2StagedComponent:
+    def to(self, *_args: object, **_kwargs: object) -> _Magi2StagedComponent:
         """Keep lifecycle-managed auxiliaries on the host between stages.
 
         The generic HSDP loader places discovered non-DiT components on the
@@ -422,7 +419,6 @@ class _Magi2StagedComponent(nn.Module):
         make Qwen and all three codecs resident together.
         """
 
-        del args, kwargs
         return self
 
     def forward(self, *args: object, **kwargs: object) -> object:
@@ -501,6 +497,10 @@ class Magi2Pipeline(
             default=bool(getattr(od_config, "fa_deterministic", False)),
         )
         os.environ["MAGI2_DETERMINISTIC"] = str(int(self.deterministic))
+        # Each diffusion worker owns one startup-fixed pipeline. Configure the
+        # process-wide PyTorch mode once instead of mutating it per request;
+        # warn-only avoids rejecting otherwise valid third-party CUDA kernels.
+        torch.use_deterministic_algorithms(self.deterministic, warn_only=True)
         self._parallel_group = get_magi2_replica_group(
             int(getattr(od_config.parallel_config, "data_parallel_size", 1) or 1)
         )
@@ -965,7 +965,7 @@ class Magi2Pipeline(
                 "with MAGI2_DETERMINISTIC set to the requested value."
             )
         seed = _resolve_request_seed(sampling)
-        _seed_request(seed, self.deterministic)
+        _seed_request(seed)
 
         has_cuda = torch.cuda.is_available()
         device_index = torch.accelerator.current_device_index() if has_cuda else None

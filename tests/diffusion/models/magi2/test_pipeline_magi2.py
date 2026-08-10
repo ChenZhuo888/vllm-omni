@@ -141,6 +141,7 @@ def test_official_id_detection_and_metadata():
     metadata = get_diffusion_model_metadata("Magi2Pipeline")
     assert metadata.supports_multimodal_inputs
     assert metadata.max_multimodal_image_inputs == 1
+    assert not metadata.resize_reference_images_to_output
     assert {"seconds", "resolution"} <= get_extra_body_params("Magi2Pipeline")
 
 
@@ -328,6 +329,8 @@ def test_cfg_parallel_branch_adapter_preserves_packed_cfg_math():
     positive, negative = sampler._split_cfg_model_input(packed)
 
     assert positive.x_t.shape[0] == negative.x_t.shape[0] == 1
+    assert packed.ref_video_feat.shape == (2, 2, 0, 1, 2)
+    assert packed.ref_video_feat.numel() == 0
     torch.testing.assert_close(positive.txt_feat[:, :3], positive_text)
     torch.testing.assert_close(negative.txt_feat[:, :2], negative_text)
 

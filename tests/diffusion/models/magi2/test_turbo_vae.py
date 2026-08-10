@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -11,6 +12,8 @@ from vllm_omni.diffusion.models.magi2.turbo_vae import (
     extract_turbo_decoder_state_dict,
     turbo_unpatchify,
 )
+
+pytestmark = [pytest.mark.diffusion, pytest.mark.cpu, pytest.mark.core_model]
 
 
 def test_turbo_unpatchify_matches_wan_channel_order():
@@ -56,3 +59,8 @@ def test_turbo_temporal_tiles_preserve_chunk_overlap_contract():
     expected = latent.repeat_interleave(4, dim=2)
 
     torch.testing.assert_close(actual, expected)
+
+    decoder.latent_mean = torch.zeros(1, device="meta")
+    decoder.latent_std = torch.ones(1, device="meta")
+    prepared, _ = decoder._prepare_latent(latent)
+    assert prepared.device.type == "meta"

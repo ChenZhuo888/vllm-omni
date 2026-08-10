@@ -158,11 +158,12 @@ class OmniOpenAIServingVideo:
         get_od_config = getattr(self._engine_client, "get_diffusion_od_config", None)
         od_config = get_od_config() if callable(get_od_config) else getattr(self._engine_client, "od_config", None)
         model_class_name = getattr(od_config, "model_class_name", None)
+        model_metadata = get_diffusion_model_metadata(model_class_name)
         if (
             input_image is not None
             and vp.width is not None
             and vp.height is not None
-            and model_class_name != "Magi2Pipeline"
+            and model_metadata.resize_reference_images_to_output
         ):
             target_size = (vp.width, vp.height)
             image_items = input_image if isinstance(input_image, list) else [input_image]

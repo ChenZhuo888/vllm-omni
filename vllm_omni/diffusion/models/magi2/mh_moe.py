@@ -461,6 +461,8 @@ class Magi2MultiHeadMoE(nn.Module):
             )
         local = checkpoint_tensor[start:end]
         if local.shape[0] < self.local_flatten_num_experts:
+            # Uneven EP/head partitions require materialized zero padding;
+            # divisible production layouts keep the mmap-backed slice above.
             padding = torch.zeros(
                 (self.local_flatten_num_experts - local.shape[0], *local.shape[1:]),
                 dtype=local.dtype,

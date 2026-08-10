@@ -477,6 +477,7 @@ class Magi2TurboVAEDecoder(nn.Module, DistributedVaeMixin):
         return hasattr(self, "distributed_executor") and super().is_distributed_enabled()
 
     def _prepare_latent(self, z: torch.Tensor) -> tuple[torch.Tensor, int]:
+        z = z.to(device=self.latent_std.device)
         dtype = z.dtype
         z = z * self.latent_std.view(1, self.z_dim, 1, 1, 1) + self.latent_mean.view(1, self.z_dim, 1, 1, 1)
         z = z.to(dtype)

@@ -343,9 +343,8 @@ class Magi2PreAdapter(nn.Module):
         video_indices: torch.Tensor,
         audio_indices: torch.Tensor,
         text_indices: torch.Tensor,
-        time_indices: torch.Tensor,
+        _time_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del time_indices
         rope = self.rope(coords_mapping)
         output = torch.zeros(
             packed.shape[0],
