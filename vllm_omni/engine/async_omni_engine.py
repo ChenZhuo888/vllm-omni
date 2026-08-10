@@ -172,6 +172,22 @@ class AsyncOmniEngine:
         self._log_stats = log_stats
         self._enable_orch_monitor = bool(kwargs.pop("enable_orch_monitor", False))
 
+        # Pack --pid-* CLI flags into a single ``pid_decode`` dict consumed by
+        # ``OmniDiffusionConfig``. When ``--pid-enable`` is set, the matching
+        # keys are popped from kwargs and re-injected as ``pid_decode`` so
+        # they flow through the normal stage-config plumbing.
+        _pid_enable = kwargs.pop("pid_enable", False)
+        if _pid_enable:
+            _pid_decode: dict[str, Any] = {"enabled": True}
+            for _cli_key, _cfg_key in (
+                ("pid_checkpoint", "checkpoint_path"),
+                ("pid_gemma", "gemma_model"),
+            ):
+                _val = kwargs.pop(_cli_key, None)
+                if _val is not None:
+                    _pid_decode[_cfg_key] = _val
+            kwargs["pid_decode"] = _pid_decode
+
         logger.info(f"[AsyncOmniEngine] Initializing with model {model}")
 
         # ------------------------------------------------------------------ #
@@ -1041,6 +1057,7 @@ class AsyncOmniEngine:
             "enable_diffusion_pipeline_profiler": kwargs.get("enable_diffusion_pipeline_profiler", False),
             "streaming_output": kwargs.get("diffusion_streaming_output", False),
             "enable_ar_profiler": kwargs.get("enable_ar_profiler", False),
+            "pid_decode": kwargs.get("pid_decode"),
             "extras": {
                 "auxiliary_text_encoder": kwargs.get("auxiliary_text_encoder", None),
                 "default_llama_model_id": kwargs.get("default_llama_model_id", "meta-llama/Meta-Llama-3.1-8B-Instruct"),

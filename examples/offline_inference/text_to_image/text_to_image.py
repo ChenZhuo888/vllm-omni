@@ -347,6 +347,45 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Supplementary auxiliary text encoder parameters model name or path (especially for Hidream-l1-full).",
     )
+    # PiD (Pixel Diffusion) super-resolution decode flags. When --pid-enable is
+    # set, the matching keys are packed into a ``pid_decode`` dict by
+    # AsyncOmniEngine and forwarded into OmniDiffusionConfig.pid_decode.
+    parser.add_argument(
+        "--pid-enable",
+        action="store_true",
+        default=False,
+        help="Enable PiD super-resolution decode (replaces VAE decode). "
+    )
+    parser.add_argument(
+        "--pid-checkpoint",
+        type=str,
+        default=None,
+        help="Path to the PiD decoder checkpoint (.pth).",
+    )
+    parser.add_argument(
+        "--pid-gemma",
+        type=str,
+        default="Efficient-Large-Model/gemma-2-2b-it",
+        help="Gemma text encoder used by PiD.",
+    )
+    parser.add_argument(
+        "--pid-scale",
+        type=int,
+        default=4,
+        help="Super-resolution factor (e.g. 4 for 4x).",
+    )
+    parser.add_argument(
+        "--pid-num-steps",
+        type=int,
+        default=4,
+        help="Number of distilled SDE sampling steps (4 for the distilled checkpoint).",
+    )
+    parser.add_argument(
+        "--pid-seed",
+        type=int,
+        default=0,
+        help="Base RNG seed for PiD sampling.",
+    )
     current_omni_platform.pre_register_and_update(parser)
     return parser.parse_args()
 
@@ -446,6 +485,21 @@ def main():
     # gate is an engine-level config (offline analog of the server's --no-guardrails).
     if args.extra_body and "guardrails" in args.extra_body:
         omni_kwargs["model_config"] = {"guardrails": bool(args.extra_body["guardrails"])}
+    # PiD: forward CLI keys to AsyncOmniEngine, which packs them into a
+    # ``pid_decode`` dict consumed by OmniDiffusionConfig. Only inject when
+    # --pid-enable is set so non-PiD runs are unaffected.
+    if args.pid_enable:
+        omni_kwargs["pid_enable"] = True
+        if args.pid_checkpoint is not None:
+            omni_kwargs["pid_checkpoint"] = args.pid_checkpoint
+        if args.pid_gemma_path is not None:
+            omni_kwargs["pid_gemma_path"] = args.pid_gemma_path
+        if args.pid_scale is not None:
+            omni_kwargs["pid_scale"] = args.pid_scale
+        if args.pid_num_steps is not None:
+            omni_kwargs["pid_num_steps"] = args.pid_num_steps
+        if args.pid_seed is not None:
+            omni_kwargs["pid_seed"] = args.pid_seed
     omni = Omni(**omni_kwargs)
     model_class_name = get_model_class_name(omni)
     declared_extra_body_params = get_extra_body_params(model_class_name)
@@ -477,6 +531,11 @@ def main():
         print(f"  LoRA: scale={args.lora_scale}")
     if args.stage_configs_path:
         print(f"  stage-configs-path: {args.stage_configs_path}")
+    if args.pid_enable:
+        print(
+            f"  PiD: enabled, scale={args.pid_scale or 'default'}, "
+            f"num_steps={args.pid_num_steps or 'default'}, seed={args.pid_seed or 'default'}"
+        )
     print(f"{'=' * 60}\n")
 
     # Build LoRA request when --lora-path is set

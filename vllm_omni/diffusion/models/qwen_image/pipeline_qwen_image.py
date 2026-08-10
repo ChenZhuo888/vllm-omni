@@ -32,6 +32,7 @@ from vllm_omni.diffusion.models.interface import SupportsComponentDiscovery
 from vllm_omni.diffusion.models.qwen_image.cfg_parallel import (
     QwenImageCFGParallelMixin,
 )
+from vllm_omni.diffusion.pid import PidDecodeMixin
 from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
     QwenImageTransformer2DModel,
 )
@@ -264,9 +265,10 @@ def apply_rotary_emb_qwen(
 
 
 class QwenImagePipeline(
-    nn.Module, QwenImageCFGParallelMixin, DiffusionPipelineProfilerMixin, SupportsComponentDiscovery
+    nn.Module, QwenImageCFGParallelMixin, PidDecodeMixin, DiffusionPipelineProfilerMixin, SupportsComponentDiscovery
 ):
     supports_request_batch = True
+    PID_BACKBONE: ClassVar[str] = "qwenimage"
     _dit_modules: ClassVar[list[str]] = ["transformer"]
     _encoder_modules: ClassVar[list[str]] = ["text_encoder"]
     _vae_modules: ClassVar[list[str]] = ["vae"]
@@ -366,6 +368,8 @@ class QwenImagePipeline(
         self.setup_diffusion_pipeline_profiler(
             enable_diffusion_pipeline_profiler=self.od_config.enable_diffusion_pipeline_profiler
         )
+
+        self._init_pid_decoder(od_config)
 
     def check_inputs(
         self,
@@ -894,6 +898,14 @@ class QwenImagePipeline(
             )
 
         latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+
+        # PiD super-resolution hook: returns decoded image or None (fall back to VAE).
+        pid_out = self.maybe_pid_decode(latents, height, width)
+        if pid_out is not None:
+            return DiffusionOutput(
+                output=pid_out,
+                stage_durations=self.stage_durations if hasattr(self, "stage_durations") else None,
+            )
         latents = latents.to(self.vae.dtype)
         latents_mean = (
             torch.tensor(self.vae.config.latents_mean)
@@ -989,7 +1001,8 @@ class QwenImagePipeline(
         height = state.sampling.height or self.default_sample_size * self.vae_scale_factor
         width = state.sampling.width or self.default_sample_size * self.vae_scale_factor
         output_type = kwargs.get("output_type") or state.sampling.output_type or "pil"
-
+        self._pid_override = getattr(state.sampling, "pid_decode", None)
+        self._pid_caption, _ = self._extract_prompts([state.prompt] if state.prompt is not None else [])
         return self._decode_latents(state.latents, height, width, output_type)
 
     def forward(self, req: DiffusionRequestBatch) -> list[DiffusionOutput]:
@@ -1080,7 +1093,9 @@ class QwenImagePipeline(
         )
 
         self._current_timestep = None
-
+        self._pid_override = getattr(common_sampling_params, "pid_decode", None)
+        self._pid_caption = prompt
+        
         result = self._decode_latents(latents, height, width, output_type)
         return split_diffusion_output_by_request(
             result,
