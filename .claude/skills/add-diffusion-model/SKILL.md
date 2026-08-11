@@ -307,6 +307,10 @@ For Omni or custom models, create:
 
 ### Step 7: Update Documentation
 
+Follow the [`add-recipe` skill](../add-recipe/SKILL.md) to add or update the
+model-family recipe and its `recipes/README.md` row with verified specifications,
+hardware, commands, feature links, and qualification evidence.
+
 Required updates:
 1. `docs/user_guide/diffusion/parallelism/overview.md` — parallelism support overview/table
 2. `docs/user_guide/diffusion/cpu_offload.md` — if CPU offload supported (add to supported models table)

@@ -162,15 +162,6 @@ The following tables show which models support each feature:
 | **MiniMax-H3**               | ✅ (FL2VA) |     ✅      |           ✅           |       ❌        |       ✅ (DiT/TE)  |         ❌         |   ✅    |             ✅             |       ✅ (tile)       |      ✅ (DiT)      |        ❌         |
 | **MAGI-2 Preview**           |     ❌     |     ✅      |      ✅ (Ulysses)       |    ✅ (2-way)   |         ✅         |         ❌         |   ✅    | ✅ (1-GPU/LW; DLO DP-AG/SP no-AG) |       ✅ (tile)       |       ❌        |        ❌         |
 
-MAGI-2 Preview uses the native vLLM-Omni pipeline. The default four-worker deployment is resident SP4; native TP4
-and TP2SP2 are also supported. HSDP can overlay Ulysses SP, and two-way CFG parallelism can replace the packed
-conditional/unconditional transformer call (for example, CFG2 x SP2 on four workers). TurboVAE tile decode can be
-distributed across the complete DiT worker group. Cache-DiT wraps only the repeated native transformer layers. DLO
-supports DP4 and DP2SP2 with AllGather, or SP4 with rank-local streaming (`--dlo-no-use-allgather`). Compatible
-single-worker execution uses ordinary layerwise offload plus native auxiliary CPU staging. Compatible eight-worker
-configurations pass topology validation but were not locally exercised for this integration. See the
-[`MAGI-2 Preview recipe`](https://github.com/vllm-project/vllm-omni/tree/main/recipes/SandAI/MAGI-2-preview.md).
-
 **Frame Interpolation Support**
 
 - **Supported**: Wan2.2 text-to-video, image-to-video, and TI2V pipelines

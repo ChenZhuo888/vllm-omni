@@ -6,40 +6,56 @@
 
 - Vendor: SandAI
 - Model: `sand-ai/MAGI-2-preview`
-- Task: Text-to-video-and-audio (T2VA) and image-to-video-and-audio (I2VA)
-- Mode: Offline shared examples and OpenAI-compatible video serving
-- Runtime: Native vLLM-Omni pipeline
-- Default deployment: Four-GPU resident SP4 (`TP=1`, `SP=4`)
+- Runtime: Native vLLM-Omni pipeline; no SandAI runtime import
+- Modes: Offline shared examples and OpenAI-compatible video serving
+- Recommended deployment: Four-GPU resident SP4 (`TP=1`, `SP=4`)
 - Maintainer: Community
 
-## When to use this recipe
+## Supported model contract
 
-Use this recipe to run MAGI-2 Preview directly through vLLM-Omni. The native
-pipeline owns model construction, checkpoint loading, sampling, Ulysses
-sequence parallelism, image conditioning, and video/audio decoding.
+### Tasks and inputs
 
-The supported native scope is the released Preview stage at `272p` or `540p`.
-Both modes produce a 10-second clip with 125 frames at 12.5 fps and synchronized
-44.1 kHz stereo audio.
+| Task | Text prompt | Media condition | Shared entrypoint |
+|---|---|---|---|
+| T2VA | Required | None | [`text_to_video.py`](../../examples/offline_inference/text_to_video/text_to_video.py) |
+| I2VA | Required | Exactly one still image | [`image_to_video.py`](../../examples/offline_inference/image_to_video/image_to_video.py) |
 
-The commands below reuse the shared
-[`text_to_video.py`](../../examples/offline_inference/text_to_video/text_to_video.py)
-and
-[`image_to_video.py`](../../examples/offline_inference/image_to_video/image_to_video.py)
-entrypoints. Do not create a model-specific example script.
+The I2VA path preserves the source aspect ratio and applies MAGI-2's native
+resize/pad transform. Video or audio conditions, multiple images, and fused
+per-rank request batches are not supported.
+
+### Output
+
+| Category | Supported Preview specification |
+|---|---|
+| Duration | Exactly 10 seconds |
+| Video | 125 frames at 12.5 fps |
+| Native tiers | `272p` (448x256) and `540p` (896x512) |
+| Optional final resize | `output_width` and `output_height` must be supplied together |
+| Audio | 44.1 kHz stereo, generated with the video |
+| Refiner | The separate 1080p refiner is not included in this integration |
+
+### Profiles provided by this recipe
+
+| Profile | Devices | Purpose | Qualification |
+|---|---:|---|---|
+| Resident SP4 | 4 | Recommended fidelity/default deployment | Released smoke and reference parity |
+| Rank-local DLO SP4 | 4 | Full-quality lower-HBM transformer streaming | Released checkpoint, 100-step T2VA and I2VA |
+| DLO DP4 / DP2SP2 | 4 | Concurrent request throughput | Bounded one- and four-step coverage |
+| Ordinary layerwise | 1 | Memory-constrained single request | Released checkpoint, one and four steps |
+| Online resident SP4 | 4 | OpenAI-compatible video API | Serving path covered |
 
 ## References
 
-- Model card: <https://huggingface.co/sand-ai/MAGI-2-preview>
-- Supported-model table: [`docs/models/supported_models.md`](../../docs/models/supported_models.md)
-- Diffusion feature table: [`docs/user_guide/diffusion_features.md`](../../docs/user_guide/diffusion_features.md)
+- Official model card: <https://huggingface.co/sand-ai/MAGI-2-preview>
+- Architecture blog: <https://sand.ai/blog/magi-2-preview>
+- Supported models: [`docs/models/supported_models.md`](../../docs/models/supported_models.md)
+- Diffusion feature matrix: [`docs/user_guide/diffusion_features.md`](../../docs/user_guide/diffusion_features.md)
 
-## Prepare the Preview checkpoint
+## Prepare the checkpoint
 
-The native pipeline requires the Preview transformer, text encoder, video and
-audio decoders, and VAE assets. These directories occupy approximately 274 GiB
-on disk. Download them to a local directory for predictable multi-worker
-startup:
+The native Preview path uses approximately 274 GiB on disk. The separate
+refiner is not required.
 
 ```bash
 export MAGI2_CKPT_ROOT=/path/to/MAGI-2-preview
@@ -50,36 +66,44 @@ hf download sand-ai/MAGI-2-preview \
   --local-dir "$MAGI2_CKPT_ROOT"
 ```
 
-Install vLLM-Omni before running the examples. The native path uses
-vLLM-Omni's normal dependencies and does not require a second model runtime.
+Install vLLM-Omni and ensure `ffmpeg` is on `PATH`. No second model runtime is
+required.
 
 ## Hardware support
 
-### GPU
+### Locally qualified NVIDIA configuration
 
-#### Default four-GPU deployment: resident SP4
+| Item | Value |
+|---|---|
+| Accelerator | NVIDIA L20X |
+| Per-device memory | 143,771 MiB (about 140.4 GiB) |
+| Device count | 4; the one-device profile uses one of the same GPUs |
+| Device interconnect | All-to-all NV18 links (`nvidia-smi topo -m`) |
+| Host memory | 2.0 TiB |
 
-The recommended default is resident sequence parallelism across all four
-workers: `--tensor-parallel-size 1 --ulysses-degree 4`. This SP4 layout is the
-reference-aligned fidelity baseline. DLO is disabled, and every worker keeps
-its rank-local Preview transformer shard device-resident during denoising.
+The official SandAI runtime requires eight NVIDIA Hopper GPUs. That official
+eight-GPU system was unavailable for this PR; compatible eight-worker
+topologies pass configuration validation but are not locally runtime-qualified.
+No H100, H200, B200, or B300 runtime claim is made here.
 
-The output worker stages the text encoder and codec components from pinned CPU
-memory only for the phase that needs them. It temporarily makes room for prompt
-encoding when required by the device capacity.
+### Software environment
 
-#### Environment
+| Item | Value |
+|---|---|
+| OS | Ubuntu 22.04.5 LTS, Linux 5.10.134 |
+| Python | 3.12.13 |
+| NVIDIA driver / CUDA runtime | 570.133.20 / 13.0 |
+| PyTorch | 2.11.0+cu130 |
+| vLLM | 0.26.0 |
+| vLLM-Omni | This PR branch; evidence commits `a5af2a8c` and `42bbfb57` |
+| Precision | BF16 |
 
-- Platform: NVIDIA CUDA
-- Workers: 4
-- Default tensor parallel size: 1
-- Default Ulysses degree / sequence parallel size: 4
-- Dtype: BF16
+Set `MAGI2_DETERMINISTIC=1` before worker startup when deterministic kernels
+are required. The setting is fixed for the worker lifetime.
 
-Set `MAGI2_DETERMINISTIC=1` before worker startup when deterministic kernels are
-required. Deterministic mode is fixed for the lifetime of the workers.
+## Offline generation
 
-#### Text-to-video-and-audio
+### Recommended four-GPU T2VA
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3
@@ -88,22 +112,19 @@ python examples/offline_inference/text_to_video/text_to_video.py \
   --model "$MAGI2_CKPT_ROOT" \
   --model-class-name Magi2Pipeline \
   --prompt "A red fox walks through fresh snow while wind moves the pine branches." \
-  --height 512 \
-  --width 896 \
-  --num-frames 125 \
-  --num-inference-steps 100 \
-  --fps 12.5 \
-  --tensor-parallel-size 1 \
-  --ulysses-degree 4 \
+  --height 512 --width 896 --num-frames 125 \
+  --num-inference-steps 100 --fps 12.5 \
+  --tensor-parallel-size 1 --ulysses-degree 4 \
   --extra-body '{"seconds":10,"resolution":"540p"}' \
   --output magi2_540p_t2va.mp4
 ```
 
-#### Image-to-video-and-audio
+For a load-and-kernel smoke, use one inference step. A one-step output is not a
+quality evaluation.
 
-The shared I2V entrypoint passes the original image to MAGI-2's
-aspect-preserving conditioning path instead of stretching it to the output
-size.
+### Recommended four-GPU I2VA
+
+Use the same geometry and parallelism with the shared I2V entrypoint:
 
 ```bash
 python examples/offline_inference/image_to_video/image_to_video.py \
@@ -111,27 +132,18 @@ python examples/offline_inference/image_to_video/image_to_video.py \
   --model-class-name Magi2Pipeline \
   --image /path/to/first_frame.png \
   --prompt "The fox looks up, then walks forward as snow falls around it." \
-  --height 512 \
-  --width 896 \
-  --num-frames 125 \
-  --num-inference-steps 100 \
-  --fps 12.5 \
-  --tensor-parallel-size 1 \
-  --ulysses-degree 4 \
+  --height 512 --width 896 --num-frames 125 \
+  --num-inference-steps 100 --fps 12.5 \
+  --tensor-parallel-size 1 --ulysses-degree 4 \
   --extra-body '{"seconds":10,"resolution":"540p"}' \
   --output magi2_540p_i2va.mp4
 ```
 
-For a load-and-kernel smoke test, change `--num-inference-steps 100` to `1`.
-The one-step form is not a quality evaluation.
+### One-device layerwise offload
 
-#### One-GPU CPU and layerwise offload
-
-MAGI-2 always stages Qwen, the image VAE, TurboVAE, and Oobleck from pinned
-CPU memory only for the phase that uses each component. The complete Preview
-transformer is too large for one qualified GPU, so standalone whole-model
-`--enable-cpu-offload` is rejected. On one worker, add ordinary layerwise
-offload so only the current and prefetched transformer blocks occupy HBM:
+MAGI-2 already stages Qwen, the image VAE, TurboVAE, and Oobleck from pinned
+CPU memory. Ordinary layerwise offload streams the Preview DiT blocks so the
+complete transformer does not need to fit in HBM at once.
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
@@ -147,198 +159,12 @@ python examples/offline_inference/text_to_video/text_to_video.py \
   --output magi2_272p_cpu_layerwise.mp4
 ```
 
-The shared offloader gives layerwise mode priority; MAGI-2's native component
-stagers continue to own the auxiliary CPU lifecycle. A released-checkpoint
-four-step run on one NVIDIA L20X produced 125 448x256 frames at 12.5 fps and
-stereo 44.1 kHz audio. It used 49.29 GiB peak reserved HBM and 371.97 GiB peak
-host PSS. The monitored run took 42.55 seconds E2E: 10.87 seconds prompt
-encoding, 25.05 seconds sampling, 4.16 seconds video decode, and 1.96 seconds
-audio decode. Host PSS sampling adds observable CPU overhead, so these timings
-are qualification evidence rather than a latency recommendation. Resident SP4
-remains the default when four GPUs are available.
-
-#### Cache-DiT acceleration
-
-MAGI-2 supports the shared Cache-DiT backend. Add these flags to either shared
-offline command:
-
-```text
---cache-backend cache_dit \
---enable-cache-dit-summary
-```
-
-The adapter wraps only `transformer.block.layers`, the repeated native
-denoising stack. The pre-adapter, post-adapter, packed CFG preparation,
-learned-sink attention, and video/audio decoders still execute normally.
-MAGI-2 packs conditional and unconditional tokens into one transformer call,
-so Cache-DiT treats each call as one denoising step rather than alternating CFG
-passes. The same adapter composes with the DLO layouts below; DLO continues to
-own layer placement while Cache-DiT decides whether the middle layers need to
-execute for a step.
-
-Cache-DiT is approximate acceleration. Keep the resident SP4 command without
-`--cache-backend` as the reference-aligned quality baseline, and validate the
-selected cache policy against that baseline for quality-sensitive workloads.
-
-The adapter lifecycle was exercised locally on four NVIDIA L20X GPUs with the
-released checkpoint, resident SP4, 272p, and four denoising steps. All ranks
-installed and refreshed Cache-DiT; the shared T2VA command completed with 125
-448x256 frames at 12.5 fps plus stereo 44.1 kHz audio. Peak reserved HBM was
-65.95 GiB per worker. The shared script's default policy uses four warmup steps,
-so this short run validates integration and output contracts, not cache speedup
-or quality. Focused three-layer checks force a cache hit under resident,
-HSDP4+SP4, and HSDP4+CFG2xSP2 execution and verify on every rank that only the
-configured front block reruns on the cached step.
-
-#### 272p variant
-
-Use the same command with these overrides:
-
-```text
---height 256 --width 448 --extra-body '{"seconds":10,"resolution":"272p"}'
-```
-
-#### Verification
-
-```bash
-ffprobe -v error \
-  -show_entries stream=codec_type,width,height,avg_frame_rate,nb_frames,sample_rate,channels \
-  -of json magi2_540p_t2va.mp4
-```
-
-The output should contain 125 video frames at 896x512 and 12.5 fps, plus stereo
-44.1 kHz audio.
-
-#### Full-quality four-GPU DLO qualification
-
-The full Preview workflow was exercised from source head `a5af2a8c` on four
-NVIDIA L20X GPUs in deterministic BF16 mode. Both runs used rank-local DLO SP4
-with all 40 transformer blocks streamed and zero resident layers:
-
-```text
---tensor-parallel-size 1 \
---ulysses-degree 4 \
---enable-distributed-layerwise-offload \
---dlo-no-use-allgather \
---dlo-resident-layers 0
-```
-
-The shared T2VA command above completed all 100 inference steps at 540p in
-563.855 seconds. The shared I2VA command completed the same 100-step/540p
-contract in 556.533 seconds, using a native 896x512 frame as its image
-condition. Both outputs contain 125 H.264 frames at 12.5 fps for 10 seconds and
-stereo 44.1 kHz AAC audio. Their MP4 SHA-256 values are respectively
-`3437d078e1ce2358e4d02554ce7cdf720b1a93bf71055f4a9b53de0e6f16fdea` and
-`b8c2a4acd333c96c6dfbbdc2b417cc018c22e38daa349b7e23aefd0966ff2de8`.
-
-These are single E2E qualification runs, not benchmark samples. The generated
-artifacts remain outside the repository, and no model-specific example or
-benchmark script is added.
-
-#### Other native four-GPU resident layouts
-
-The native transformer also supports tensor parallelism. All three resident
-layouts below were exercised end to end on four NVIDIA L20X GPUs:
-
-| Layout | Shared-example flags | Distribution |
-|---|---|---|
-| SP4 (default) | `--tensor-parallel-size 1 --ulysses-degree 4` | Ulysses token/head partition plus rank-local MoE-head shards |
-| TP2SP2 | `--tensor-parallel-size 2 --ulysses-degree 2` | Native TP matrix shards and row reductions inside each two-rank TP group, plus two-way Ulysses |
-| TP4 | `--tensor-parallel-size 4 --ulysses-degree 1` | Native four-way TP matrix shards and row reductions |
-
-Use the same shared T2VA or I2VA command and replace only the two parallelism
-flags. The pipeline requires `TP x SP = 4` for a resident four-worker run and
-validates attention-head, MoE-head, hidden-size, and intermediate-size
-divisibility. The TP and SP layouts are deterministic within a fixed topology,
-but BF16 collective order can produce topology-dependent numeric differences;
-use SP4 when fidelity against the reference-aligned baseline is the priority.
-
-#### HSDP, CFG parallelism, and distributed TurboVAE decode
-
-The native pipeline also composes the shared HSDP, two-branch CFG, and VAE
-parallel primitives with MAGI-2's Ulysses path. Add the relevant flags to the
-shared T2VA or I2VA command:
-
-| Four-worker layout | Additional flags |
-|---|---|
-| HSDP4 + SP4 | `--ulysses-degree 4 --use-hsdp --hsdp-shard-size 4` |
-| CFG2 x SP2 | `--ulysses-degree 2 --cfg-parallel-size 2` |
-| HSDP4 + CFG2 x SP2 | `--ulysses-degree 2 --cfg-parallel-size 2 --use-hsdp --hsdp-shard-size 4` |
-| TurboVAE tile decode across four workers | `--vae-patch-parallel-size 4 --vae-use-tiling` |
-
-HSDP uses FSDP2 for the dense transformer parameters while preserving MAGI's
-already-SP-sharded MoE parameters. It cannot be combined with TP or DLO. CFG
-parallelism assigns the positive and negative branches to separate CFG ranks
-and preserves MAGI-2's distinct video/audio guidance, dynamic CFG, skimming,
-and rescaling rules. `CFG2 x SP4` requires eight workers; use `CFG2 x SP2` on a
-four-worker host.
-
-Local qualification covered the real four-rank FSDP2 + SP4 collective path and
-the combined HSDP4 + CFG2 x SP2 path with small native transformers. Both
-matched their single-rank oracles within the documented BF16 tolerance. A
-released-checkpoint HSDP3 + SP3 bring-up also produced byte-identical output to
-resident SP3, but three-worker execution is not a supported deployment layout.
-Released-checkpoint HSDP4 E2E remains follow-up evidence; resident SP4 stays the
-recommended default because HSDP materialization already showed higher peak
-HBM during bring-up.
-
-TurboVAE patch parallelism distributes the decoder's exact temporal tile
-chunks across the complete worker group; it does not introduce approximate
-spatial crops. A released-checkpoint 540p PP4 decode matched resident decode
-exactly (`max_abs_error=0`, identical SHA-256). Audio decode remains on the
-output rank. VAE parallelism currently requires tile mode and a parallel size
-equal to the complete DiT worker count.
-
-#### Distributed layerwise offload
-
-Distributed layerwise offload (DLO) streams the 40 Preview transformer blocks
-from host memory. The following four-GPU layouts were exercised end to end:
-
-| Layout | Parallelism and DLO flags | AllGather | Concurrent requests |
-|---|---|:---:|:---:|
-| DP4 | `--data-parallel-size 4 --tensor-parallel-size 1 --ulysses-degree 1 --enable-distributed-layerwise-offload --dlo-resident-layers 0` | Yes (default) | 4 |
-| DP2SP2 | `--data-parallel-size 2 --tensor-parallel-size 1 --ulysses-degree 2 --enable-distributed-layerwise-offload --dlo-resident-layers 0` | Yes (default) | 2 |
-| SP4 | `--tensor-parallel-size 1 --ulysses-degree 4 --enable-distributed-layerwise-offload --dlo-no-use-allgather --dlo-resident-layers 0` | No, rank-local | 1 |
-
-For DP4 and DP2SP2, DLO first applies the native local weight transform (such
-as the SP-local MoE-head slice), then stores an orthogonal DP shard and
-reconstructs the transformed tensor with AllGather for each block. All DP
-ranks must therefore advance together. Send exactly `data_parallel_size`
-concurrent requests with the same explicit `num_inference_steps` value.
-
-SP4 ranks own different MoE-head shards, so SP-only DLO must use rank-local
-streaming with `--dlo-no-use-allgather`. Add these flags to either shared
-offline command to use that profile:
-
-```text
---enable-distributed-layerwise-offload \
---dlo-no-use-allgather \
---dlo-resident-layers 0
-```
-
-The deterministic decoded video and audio from the SP4 DLO profile matched the
-resident SP4 run exactly. The shared offline entrypoints expose TP, SP, and DLO
-options, but not DP request-wave configuration; use online serving for the DP4
-and DP2SP2 AllGather profiles.
-
-DLO with AllGather does not support tensor parallelism. Data parallelism is
-supported only with DLO, and SP-only DLO with AllGather is rejected during
-pipeline validation.
-
-#### Eight-GPU configuration status
-
-The topology validator also accepts compatible eight-worker factorizations.
-Examples include resident SP8, TP2SP4, and TP4SP2; DLO DP8, DP4SP2, and DP2SP4
-use AllGather, while SP8 uses rank-local no-AllGather streaming. These profiles
-must still satisfy the same dimension checks and DLO restrictions above.
-
-Only the four-GPU layouts were exercised locally for this integration. Treat
-the eight-GPU profiles as supported configuration validation, not as local
-runtime qualification.
+Standalone `--enable-cpu-offload` is rejected because staging whole modules
+does not make the complete Preview DiT fit on one qualified GPU. When both
+flags are supplied, the shared offloader selects layerwise mode and MAGI's
+native auxiliary staging remains active.
 
 ## Online serving
-
-This four-worker example uses the default resident SP4 topology:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3
@@ -366,50 +192,80 @@ curl -X POST http://localhost:8091/v1/videos/sync \
 
 For I2VA, add `-F 'input_reference=@first_frame.png;type=image/png'`.
 
-To serve DLO DP4, replace the default parallelism flags with
-`--data-parallel-size 4 --tensor-parallel-size 1 --ulysses-degree 1` and add
-`--enable-distributed-layerwise-offload --dlo-resident-layers 0`. For DLO
-DP2SP2, use `--data-parallel-size 2`, `--tensor-parallel-size 1`, and
-`--ulysses-degree 2` with the same DLO flags. Submit four or two concurrent
-requests, respectively, and keep `num_inference_steps` identical across the
-request wave.
+## Supported features
 
-## MAGI-2 request fields
+Use the shared guides for launch syntax and feature semantics. The flags below
+are the MAGI-2-specific qualified combinations.
+
+| Feature | MAGI-2 status / topology | Guide |
+|---|---|---|
+| Sequence parallel | Resident SP4 default; compatible SP8 configuration | [Sequence parallel](../../docs/user_guide/diffusion/parallelism/sequence_parallel.md) |
+| Tensor parallel | TP4 or TP2SP2 on four workers | [Tensor parallel](../../docs/user_guide/diffusion/parallelism/tensor_parallel.md) |
+| DLO | DP4/DP2SP2 AllGather; SP4 rank-local requires `--dlo-no-use-allgather` | [Distributed layerwise offload](../../docs/design/feature/distributed_layerwise_offload.md) |
+| HSDP | HSDP4+SP4; alternative to TP and DLO | [HSDP](../../docs/user_guide/diffusion/parallelism/hsdp.md) |
+| CFG parallel | CFG2xSP2 on four workers; CFG2xSP4 requires eight | [CFG parallel](../../docs/user_guide/diffusion/parallelism/cfg_parallel.md) |
+| VAE patch parallel | TurboVAE tile decode across the complete worker group | [VAE parallelism](../../docs/user_guide/diffusion/parallelism/vae_parallelism.md) |
+| Cache-DiT | Repeated Preview transformer layers; approximate | [Cache-DiT](../../docs/user_guide/diffusion/cache_acceleration/cache_dit.md) |
+| One-device offload | Ordinary layerwise DiT plus native auxiliary CPU staging | [CPU offload](../../docs/user_guide/diffusion/cpu_offload.md) |
+| Quantization | Not supported | [Feature matrix](../../docs/user_guide/diffusion_features.md) |
+| Ring / pipeline parallel | Not supported | [Feature matrix](../../docs/user_guide/diffusion_features.md) |
+
+DP request waves must contain exactly `data_parallel_size` requests with the
+same explicit step count. Data-parallel replicas require TP=1. SP-only DLO
+cannot AllGather because SP ranks own different MoE-head shards.
+
+## Request fields
 
 Common geometry and sampling values use the shared CLI flags. The native
-Preview pipeline accepts these model-specific values through `--extra-body`:
+Preview pipeline accepts these model-specific `--extra-body` fields:
 
 | Field | Meaning |
 |---|---|
-| `seconds` | Output duration; the Preview release supports `10` only. |
-| `resolution` | Native generation tier: `272p` or `540p`; default `540p`. |
-| `output_width`, `output_height` | Optional final decoded-frame resize; both must be supplied. |
-| `deterministic` | Must match `MAGI2_DETERMINISTIC` fixed at worker startup. |
+| `seconds` | Must be `10`. |
+| `resolution` | `272p` or `540p`; default `540p`. |
+| `output_width`, `output_height` | Optional final resize; supply both. |
+| `deterministic` | Must match `MAGI2_DETERMINISTIC` at worker startup. |
 
 Use `--image` in the shared I2V entrypoint rather than the lower-level
-`image_path` extra field.
+`image_path` field.
 
-## Known limitations
+## Verification
 
-- Each replica processes one request at a time. DLO DP4 and DP2SP2 can process
-  four and two matched requests concurrently across replicas; fused per-rank
-  request batching is not supported.
-- Only the published 10-second, 125-frame, 12.5-fps Preview workflow is supported.
-- Native generation is limited to the `272p` and `540p` tiers.
-- The worker world must contain one GPU with ordinary layerwise offload, or 4/8
-  GPUs for parallel execution. Parallel dimensions must cover the full worker
-  world and pass the model-dimension divisibility checks.
-- Data parallelism requires DLO. DLO data-parallel replicas require TP=1, and
-  DLO AllGather requires DP greater than 1.
-- Quantization, standalone module-level CPU offload, ring sequence parallelism,
-  and pipeline parallelism are not supported. Single-worker ordinary layerwise
-  offload, HSDP, Cache-DiT, two-way CFG parallelism, and TurboVAE tile
-  parallelism use the qualified paths documented above.
-- SP-only DLO requires `--dlo-no-use-allgather`; SP ranks own different
-  MoE-head shards and cannot form a DLO AllGather group with one another.
-- Full 100-step 540p T2VA and I2VA were qualified only with four-device
-  rank-local DLO SP4. The DP4/DP2SP2 DLO profiles retain bounded one-step and
-  four-step coverage rather than full-quality qualification.
-- The model card's official eight-Hopper runtime was not available on the
-  four-L20X qualification host. Compatible eight-worker topologies pass
-  configuration validation but remain runtime-unqualified in this PR.
+```bash
+ffprobe -v error \
+  -show_entries stream=codec_type,width,height,avg_frame_rate,nb_frames,sample_rate,channels \
+  -of json magi2_540p_t2va.mp4
+```
+
+A 540p result contains 125 896x512 frames at 12.5 fps and stereo 44.1 kHz
+audio. A 272p result contains 125 448x256 frames with the same duration, rate,
+and audio contract.
+
+## Local qualification evidence
+
+### Released-checkpoint E2E
+
+| Profile | Workload | Steps | E2E | Peak HBM | Peak host PSS | Output |
+|---|---|---:|---:|---:|---:|---|
+| DLO SP4 | 540p T2VA | 100 | 563.855 s | See PR evidence | See PR evidence | `3437d078e...f16fdea` |
+| DLO SP4 | 540p I2VA | 100 | 556.533 s | See PR evidence | See PR evidence | `b8c2a4ac...ff2de8` |
+| Layerwise 1 GPU | 272p T2VA | 1 | 8.86 s | 49.29 GiB | Not sampled | Valid video + audio |
+| Layerwise 1 GPU | 272p T2VA | 4 | 42.55 s | 49.29 GiB | 371.97 GiB | Valid video + audio |
+
+The one-device four-step host-PSS sampler scans the full process tree and adds
+observable CPU overhead, so its stage timing is qualification evidence rather
+than a latency benchmark.
+
+### Distributed correctness
+
+- Resident TP4, TP2SP2, and SP4 match a single-rank native oracle within the
+  documented BF16 tolerance; resident SP4 is the reference-aligned default.
+- Deterministic rank-local DLO SP4 output matched resident SP4 exactly.
+- HSDP4+SP4, HSDP4+CFG2xSP2, Cache-DiT forced hits, and TurboVAE PP4 have
+  focused four-rank coverage. TurboVAE PP4 matched resident decode exactly.
+- Full 100-step 540p quality generation is qualified only for four-device DLO
+  SP4. Eight-worker layouts remain configuration-only on this host.
+
+These are bounded qualification runs, not committed benchmarks. Generated
+artifacts stay outside the repository, and this integration adds no
+model-specific example or benchmark script.
