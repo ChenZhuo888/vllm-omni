@@ -544,7 +544,16 @@ For comprehensive testing guidelines, please refer to the [Test Writing Guide](.
 
 ## Adding a Model Recipe
 
-After implementing and testing your model, please add a model recipe to the [vllm-project/recipes](https://github.com/vllm-project/recipes) repository. This helps other users understand how to use your model with vLLM-Omni.
+After implementing and testing your model, add a recipe under this repository's
+`recipes/` directory. Follow the
+[`add-recipe` skill](https://github.com/vllm-project/vllm-omni/blob/main/.claude/skills/add-recipe/SKILL.md)
+and [`recipes/TEMPLATE.md`](https://github.com/vllm-project/vllm-omni/blob/main/recipes/TEMPLATE.md),
+then update the model row in
+[`recipes/README.md`](https://github.com/vllm-project/vllm-omni/blob/main/recipes/README.md).
+The external
+[vllm-project/recipes](https://github.com/vllm-project/recipes) repository can
+be used as a structural reference, but it is not the destination for a
+vLLM-Omni model recipe.
 
 ### What to Include
 
@@ -558,15 +567,10 @@ Your recipe should include:
 3. **Usage Examples**: Command-line examples demonstrating how to run the model
 4. **Configuration Details**: Important configuration parameters and their meanings
 
-### Example
-
-For reference, see the [LongCat recipe example](https://github.com/vllm-project/recipes/pull/179) which demonstrates the expected format and structure.
-
 ### Recipe Location
 
-Create your recipe file in the appropriate directory structure:
-- For organization-specific models: `OrganizationName/ModelName.md`
-- For general models: `ModelName.md`
+Create `recipes/<vendor>/<model-family>.md` and keep commands, feature status,
+hardware evidence, and limitations specific to the model family.
 
 The recipe should be a Markdown file that provides clear, reproducible instructions for users to get started with your model.
 
@@ -580,7 +584,7 @@ Adding a new model to vLLM-Omni involves:
 4. **Create stage configuration** YAML file
 5. **Implement stage input processors** for stage transitions
 6. **Write tests** to verify functionality
-7. **Add model recipe** to the [vllm-project/recipes](https://github.com/vllm-project/recipes) repository (see [Adding a Model Recipe](#adding-a-model-recipe) section)
+7. **Add an in-repository model recipe** under `recipes/` and update its index (see [Adding a Model Recipe](#adding-a-model-recipe))
 
 ### Qwen3-Omni Reference Files
 

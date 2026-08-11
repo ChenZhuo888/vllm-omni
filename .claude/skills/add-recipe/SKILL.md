@@ -15,6 +15,20 @@ available local qualification evidence.
 Do not infer support from a model name, sibling recipe, registry entry, or
 topology validator. Mark unexecuted configurations as configuration-only.
 
+## Route by model family
+
+Read only the contributor and user documentation relevant to the model:
+
+| Family | Contributor guide | User-facing documentation to synchronize |
+|---|---|---|
+| Diffusion | [`adding a diffusion model`](../add-diffusion-model/SKILL.md) | `docs/user_guide/diffusion_features.md`, applicable diffusion feature guides, and shared image/video/audio examples |
+| TTS | [`adding a TTS model`](../../../docs/contributing/model/adding_tts_model.md) | `examples/offline_inference/text_to_speech/README.md`, `examples/online_serving/text_to_speech/README.md`, and `docs/serving/speech_api.md` |
+| Omni | [`adding an omni model`](../../../docs/contributing/model/adding_omni_model.md) | model-family offline/online example docs, `docs/serving/chat_completions_api.md`, and `docs/user_guide/feature_compatibility.md` |
+
+All families must update `docs/models/supported_models.md` and the matching row
+in `recipes/README.md`. Do not add a modality-specific support document when
+the repository has no such table; update the closest shared user contract.
+
 ## Structure the recipe
 
 Keep the recipe task-oriented and use one model-family file under
@@ -55,12 +69,12 @@ count, and DP/TP/SP/PP sizes with the deployment profile or exact command.
 Never generalize a result from one accelerator family to another. Distinguish
 upstream requirements from hardware exercised by the PR.
 
-## Keep feature documentation concise
+## Keep shared documentation concise
 
-Link to shared guides under `docs/user_guide/diffusion/` or design pages under
-`docs/design/feature/` for feature semantics and generic launch instructions.
-The recipe should contain only the model-specific status, valid topology,
-required flag difference, and evidence boundary.
+Link the applicable diffusion, TTS, omni, serving, or design guide for generic
+feature semantics and launch instructions. The recipe should contain only the
+model-specific status, valid topology, required flag difference, and evidence
+boundary.
 
 Put unsupported combinations in the same feature table. Avoid repeating the
 same model-specific prose below the global feature matrix; the recipe is the
@@ -87,8 +101,7 @@ Update all applicable locations:
 
 - the row in `recipes/README.md`;
 - `docs/models/supported_models.md`;
-- the relevant row in `docs/user_guide/diffusion_features.md` or other support
-  matrix;
+- the family-specific documentation selected in **Route by model family**;
 - shared example documentation when commands or flags change.
 
 Keep global support tables compact. Link to the recipe instead of duplicating

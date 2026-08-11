@@ -45,7 +45,7 @@ th {
 | `LTX2DistilledPipeline` | LTX-2 distilled two-stage T2V and I2V | `rootonchair/LTX-2-19b-distilled` | ✅︎ | ✅︎ | | | — |
 | `LingBotVideoPipeline` | LingBot-Video dense and MoE T2I, T2V, TI2V | `robbyant/lingbot-video-dense-1.3b`, `robbyant/lingbot-video-moe-30b-a3b` | ✅︎ | | | | — |
 | `MiniMaxH3Pipeline` | MiniMax H3 T2VA, first/last-keyframe FL2VA, and mixed-reference Ref2VA | `MiniMaxAI/MiniMax-H3` | ✅︎ | ✅︎ | | | [Published](https://recipes.vllm.ai/MiniMaxAI/MiniMax-H3) |
-| `Magi2Pipeline` | MAGI-2 native Preview-stage T2VA and I2VA (272p/540p)<sup>2</sup> | `sand-ai/MAGI-2-preview` | ✅︎ | | | | [Repository](https://github.com/vllm-project/vllm-omni/blob/main/recipes/SandAI/MAGI-2-preview.md) |
+| `Magi2Pipeline` | MAGI-2 native Preview-stage T2VA and I2VA (272p/540p) | `sand-ai/MAGI-2-preview` | ✅︎ | | | | [Repository](https://github.com/vllm-project/vllm-omni/blob/main/recipes/SandAI/MAGI-2-preview.md) |
 | `DreamZeroPipeline` | DreamZero-DROID | `GEAR-Dreams/DreamZero-DROID` | ✅︎ | ✅︎ | ✅︎ | ✅︎ | — |
 | `HeliosPipeline`, `HeliosPyramidPipeline` | Helios | `BestWishYsh/Helios-Base`, `BestWishYsh/Helios-Mid`, `BestWishYsh/Helios-Distilled` | ✅︎ | ✅︎ | ✅︎ | | — |
 | `MagiHumanPipeline` | MagiHuman | `SII-GAIR/daVinci-MagiHuman-Base-1080p` | ✅︎ | ✅︎ | | | — |
@@ -107,16 +107,3 @@ explicitly documented in that recipe. Other rows retain the implementation
 support metadata until their recipe is audited.
 
 ✅︎ indicates the model is supported on that backend. Empty cells mean not listed as supported on that backend.
-
-<sup>H3</sup> MiniMax H3 AMD GPU support is validated on gfx942 (MI300X) and
-gfx950 (MI350) in BF16, using the AITER `FLASH_ATTN` diffusion attention backend.
-Other AMD SKUs (e.g. MI325X) are not listed until their
-own validation evidence is added. See the
-[MiniMax H3 recipe](https://recipes.vllm.ai/MiniMaxAI/MiniMax-H3) for
-per-architecture serving commands.
-
-<sup>2</sup> MAGI-2 Preview runs through the native vLLM-Omni pipeline. The reference-aligned default is resident
-SP4; native TP4 and TP2SP2 plus DLO DP4, DP2SP2, and rank-local SP4 are supported on four GPUs. Compatible
-single-worker execution uses ordinary layerwise offload with native auxiliary CPU staging. Compatible eight-worker
-configurations pass topology validation but were not locally exercised for this integration. See the
-[`MAGI-2 Preview recipe`](https://github.com/vllm-project/vllm-omni/tree/main/recipes/SandAI/MAGI-2-preview.md).
