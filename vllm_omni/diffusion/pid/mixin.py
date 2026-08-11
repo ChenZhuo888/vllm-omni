@@ -71,6 +71,7 @@ class PidDecodeMixin:
             config=self._pid_config,
             backbone=self.PID_BACKBONE,
             enforce_eager=bool(getattr(od_config, "enforce_eager", False)),
+            quant_config=od_config.quantization_config,
         )
         # Eager load: weights are resident before the first request.
         decoder.load_weights()

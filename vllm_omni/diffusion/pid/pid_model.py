@@ -41,9 +41,10 @@ class PidInferenceModel(nn.Module):
         sampling_overrides: dict | None = None,
         precision: str = "bfloat16",
         enforce_eager: bool = False,
+        quant_config=None,
     ):
         super().__init__()
-        self.net = PidNet(**net_kwargs)
+        self.net = PidNet(**net_kwargs, quant_config=quant_config)
         self.text_encoder = GemmaTextEncoder(gemma_model_id, precision=precision)
 
         samp = dict(PID_SAMPLING_CONFIG)

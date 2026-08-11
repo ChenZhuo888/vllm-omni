@@ -93,6 +93,7 @@ class PidNet(PixDiT_T2I):
         latent_spatial_down_factor: int = 8,
         # --- PiT LQ injection args ---
         pit_lq_inject: bool = False,
+        quant_config=None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -120,6 +121,7 @@ class PidNet(PixDiT_T2I):
             ed_num_heads=ed_num_heads,
             ed_hidden_size=ed_hidden_size,
             ed_use_token_shuffle=ed_use_token_shuffle,
+            quant_config=quant_config,
         )
 
         assert lq_inject_mode == "controlnet", (

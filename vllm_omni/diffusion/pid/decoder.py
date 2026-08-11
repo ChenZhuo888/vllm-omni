@@ -71,6 +71,7 @@ class PidDecoder(nn.Module):
         config: PidDecodeConfig,
         backbone: str,
         enforce_eager: bool = False,
+        quant_config=None,
     ):
         super().__init__()
         self.device = get_local_device()
@@ -78,6 +79,7 @@ class PidDecoder(nn.Module):
         self._backbone = backbone
         self._enforce_eager = enforce_eager
         self._model: PidInferenceModel | None = None
+        self.quant_config = quant_config
 
     # -- weight loading ----------------------------------------------------
 
@@ -99,6 +101,7 @@ class PidDecoder(nn.Module):
             sampling_overrides=dict(PID_SAMPLING_CONFIG),
             precision=cfg.precision,
             enforce_eager=self._enforce_eager,
+            quant_config=self.quant_config,
         )
         load_pid_checkpoint(model, cfg.checkpoint_path)
         model.eval()
