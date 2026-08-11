@@ -29,6 +29,30 @@ HAS_FLASH_ATTN = fa.HAS_FLASH_ATTN
 flash_attn_func = fa.flash_attn_func  # noqa: N813
 
 
+@pytest.mark.parametrize(
+    ("device_major", "requested", "supported", "expected"),
+    [
+        (8, None, frozenset((2, 3, 4)), 2),
+        (9, None, frozenset((2, 3, 4)), 3),
+        (10, None, frozenset((2, 3, 4)), 4),
+        (12, None, frozenset((2, 3, 4)), 4),
+        (9, None, frozenset((2,)), 2),
+        (10, None, frozenset((2, 3)), 2),
+        (9, "2", frozenset((2, 3, 4)), 2),
+        (9, "4", frozenset((2, 3, 4)), 4),
+    ],
+)
+def test_versioned_flash_attention_selection(device_major, requested, supported, expected):
+    assert fa._choose_vllm_flash_attn_version(device_major, requested, supported) == expected
+
+
+def test_versioned_flash_attention_selection_rejects_invalid_or_unavailable_version():
+    with pytest.raises(ValueError, match="must be 2, 3, or 4"):
+        fa._choose_vllm_flash_attn_version(9, "5", frozenset((2, 3, 4)))
+    with pytest.raises(RuntimeError, match="FlashAttention 4 is unavailable"):
+        fa._choose_vllm_flash_attn_version(9, "4", frozenset((2, 3)))
+
+
 def create_attention_mask(batch_size: int, seq_len: int, valid_len: int, device: torch.device) -> torch.Tensor:
     """
     Create attention mask where first valid_len tokens are valid (1) and rest are padding (0).

@@ -21,6 +21,10 @@ import torch
 import torch.nn as nn
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
+from vllm_omni.diffusion.attention.backends.utils.fa import (
+    resolve_vllm_flash_attn_version,
+    vllm_flash_attn_varlen_with_lse,
+)
 
 from .parallel import (
     Magi2ParallelGroup,
@@ -32,39 +36,12 @@ from .parallel import (
 logger = logging.getLogger(__name__)
 
 
-def _choose_flash_attn_version(
-    device_major: int,
-    requested: str | None,
-    supported_versions: frozenset[int],
-) -> int:
-    if requested is not None:
-        try:
-            version = int(requested)
-        except ValueError as error:
-            raise ValueError("MAGI2_FLASH_ATTN_VERSION must be 2 or 3") from error
-        if version not in (2, 3):
-            raise ValueError("MAGI2_FLASH_ATTN_VERSION must be 2 or 3")
-        if version not in supported_versions:
-            raise RuntimeError(f"FlashAttention {version} is unavailable on this device")
-        return version
-
-    if device_major == 9 and 3 in supported_versions:
-        return 3
-    if 2 not in supported_versions:
-        raise RuntimeError("FlashAttention 2 is unavailable on this device")
-    return 2
-
-
 @cache
 def _resolve_flash_attn_version() -> int:
-    """Prefer FA3 on Hopper while retaining a diagnostic FA2 override."""
+    """Apply MAGI-2's operator override to the shared FA2/FA3/FA4 resolver."""
 
-    from vllm.vllm_flash_attn.flash_attn_interface import is_fa_version_supported
-
-    device_major = torch.cuda.get_device_capability()[0]
-    supported_versions = frozenset(version for version in (2, 3) if is_fa_version_supported(version))
     requested = os.environ.get("MAGI2_FLASH_ATTN_VERSION")
-    version = _choose_flash_attn_version(device_major, requested, supported_versions)
+    version = resolve_vllm_flash_attn_version(requested)
     logger.info("MAGI-2 selected FlashAttention %d", version)
     return version
 
@@ -201,40 +178,6 @@ def torch_varlen_attention_with_sink(
     return output
 
 
-def _flash_attn_varlen(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    *,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_k: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
-    softcap: float,
-    deterministic: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-
-    normalized_softcap = float(softcap) if float(softcap) > 0 else 0.0
-    return flash_attn_varlen_func(
-        q,
-        k,
-        v,
-        int(max_seqlen_q),
-        cu_seqlens_q,
-        int(max_seqlen_k),
-        cu_seqlens_k=cu_seqlens_k,
-        dropout_p=0.0,
-        softmax_scale=None,
-        causal=False,
-        window_size=None,
-        softcap=normalized_softcap,
-        deterministic=deterministic,
-        return_softmax_lse=True,
-        fa_version=_resolve_flash_attn_version(),
-    )
-
-
 def packed_attention_with_sink(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -250,7 +193,7 @@ def packed_attention_with_sink(
     cu_q = cu_q.to(device=q.device, dtype=torch.int32).contiguous()
     cu_k = cu_k.to(device=q.device, dtype=torch.int32).contiguous()
     if q.is_cuda:
-        out, lse = _flash_attn_varlen(
+        out, lse = vllm_flash_attn_varlen_with_lse(
             q,
             k,
             v,
@@ -260,6 +203,7 @@ def packed_attention_with_sink(
             max_seqlen_k=max_k,
             softcap=softcap,
             deterministic=os.environ.get("MAGI2_DETERMINISTIC", "0") == "1",
+            fa_version=_resolve_flash_attn_version(),
         )
         return correct_out_lse_with_sink(out, lse, sink)[0]
     return torch_varlen_attention_with_sink(
