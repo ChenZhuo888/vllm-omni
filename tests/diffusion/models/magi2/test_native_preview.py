@@ -7,7 +7,10 @@ import torch
 
 from vllm_omni.diffusion.cache.cachedit.model_specific import enable_cache_for_magi2
 from vllm_omni.diffusion.data import DiffusionCacheConfig
-from vllm_omni.diffusion.models.magi2.attention import VarlenHandler
+from vllm_omni.diffusion.models.magi2.attention import (
+    VarlenHandler,
+    _choose_flash_attn_version,
+)
 from vllm_omni.diffusion.models.magi2.configuration_magi2 import (
     Magi2MHCConfig,
     Magi2MoEConfig,
@@ -79,6 +82,14 @@ def test_hsdp_policy_shards_individual_preview_layers():
     assert condition("block.layers.1", model.block.layers[1])
     assert not condition("block", model.block)
     assert not condition("pre_adapter", model.pre_adapter)
+
+
+def test_flash_attention_prefers_fa3_on_hopper_with_fa2_override() -> None:
+    supported = frozenset((2, 3))
+
+    assert _choose_flash_attn_version(9, None, supported) == 3
+    assert _choose_flash_attn_version(8, None, supported) == 2
+    assert _choose_flash_attn_version(9, "2", supported) == 2
 
 
 def test_tiny_native_preview_runs_through_nested_cachedit_adapter() -> None:

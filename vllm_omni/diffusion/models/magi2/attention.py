@@ -12,8 +12,10 @@ PyTorch path is an exact, portable oracle for small tests.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+from functools import cache
 
 import torch
 import torch.nn as nn
@@ -26,6 +28,45 @@ from .parallel import (
     scatter_heads_gather_seqlen,
     scatter_seqlen_gather_heads,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _choose_flash_attn_version(
+    device_major: int,
+    requested: str | None,
+    supported_versions: frozenset[int],
+) -> int:
+    if requested is not None:
+        try:
+            version = int(requested)
+        except ValueError as error:
+            raise ValueError("MAGI2_FLASH_ATTN_VERSION must be 2 or 3") from error
+        if version not in (2, 3):
+            raise ValueError("MAGI2_FLASH_ATTN_VERSION must be 2 or 3")
+        if version not in supported_versions:
+            raise RuntimeError(f"FlashAttention {version} is unavailable on this device")
+        return version
+
+    if device_major == 9 and 3 in supported_versions:
+        return 3
+    if 2 not in supported_versions:
+        raise RuntimeError("FlashAttention 2 is unavailable on this device")
+    return 2
+
+
+@cache
+def _resolve_flash_attn_version() -> int:
+    """Prefer FA3 on Hopper while retaining a diagnostic FA2 override."""
+
+    from vllm.vllm_flash_attn.flash_attn_interface import is_fa_version_supported
+
+    device_major = torch.cuda.get_device_capability()[0]
+    supported_versions = frozenset(version for version in (2, 3) if is_fa_version_supported(version))
+    requested = os.environ.get("MAGI2_FLASH_ATTN_VERSION")
+    version = _choose_flash_attn_version(device_major, requested, supported_versions)
+    logger.info("MAGI-2 selected FlashAttention %d", version)
+    return version
 
 
 @dataclass(frozen=True)
@@ -190,7 +231,7 @@ def _flash_attn_varlen(
         softcap=normalized_softcap,
         deterministic=deterministic,
         return_softmax_lse=True,
-        fa_version=2,
+        fa_version=_resolve_flash_attn_version(),
     )
 
 

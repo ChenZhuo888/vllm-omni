@@ -101,6 +101,11 @@ No H100, H200, B200, or B300 runtime claim is made here.
 Set `MAGI2_DETERMINISTIC=1` before worker startup when deterministic kernels
 are required. The setting is fixed for the worker lifetime.
 
+MAGI-2 uses vLLM's bundled FlashAttention 3 kernels by default on Hopper
+(compute capability 9.x), with FlashAttention 2 as the default on other
+architectures. Set `MAGI2_FLASH_ATTN_VERSION=2` before worker startup to force
+the FA2 fallback for diagnostics or output comparisons.
+
 ## Offline generation
 
 ### Recommended four-GPU T2VA
