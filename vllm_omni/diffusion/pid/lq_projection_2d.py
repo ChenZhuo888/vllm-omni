@@ -3,7 +3,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -38,15 +37,13 @@ class SigmaAwarePerTokenGate(nn.Module):
         nn.init.constant_(self.content_proj.bias, 2.0)
         self.log_alpha = nn.Parameter(torch.tensor(math.log(5.0)))
 
-    def compute_gate_scalar(
-        self, x: torch.Tensor, lq: torch.Tensor, sigma: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def compute_gate_scalar(self, x: torch.Tensor, lq: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
         assert sigma is not None, "SigmaAwarePerTokenGate requires degrade_sigma input"
         content_logit = self.content_proj(torch.cat([x, lq], dim=-1))  # (B, N, 1)
         sigma_offset = -self.log_alpha.exp() * sigma.float().view(-1, 1, 1)  # (B, 1, 1)
         return torch.sigmoid(content_logit + sigma_offset)  # (B, N, 1)
 
-    def forward(self, x: torch.Tensor, lq: torch.Tensor, sigma: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lq: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
         return x + self.compute_gate_scalar(x, lq, sigma) * lq
 
 
@@ -65,15 +62,13 @@ class SigmaAwarePerTokenAndDimGate(nn.Module):
         nn.init.constant_(self.content_proj.bias, 2.0)
         self.log_alpha = nn.Parameter(torch.tensor(math.log(5.0)))
 
-    def compute_gate_scalar(
-        self, x: torch.Tensor, lq: torch.Tensor, sigma: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def compute_gate_scalar(self, x: torch.Tensor, lq: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
         assert sigma is not None, "SigmaAwarePerTokenAndDimGate requires degrade_sigma input"
         content_logit = self.content_proj(torch.cat([x, lq], dim=-1))  # (B, N, D)
         sigma_offset = -self.log_alpha.exp() * sigma.float().view(-1, 1, 1)  # (B, 1, 1)
         return torch.sigmoid(content_logit + sigma_offset)  # (B, N, D)
 
-    def forward(self, x: torch.Tensor, lq: torch.Tensor, sigma: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lq: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
         return x + self.compute_gate_scalar(x, lq, sigma) * lq
 
 
@@ -223,11 +218,9 @@ class LQProjection2D(nn.Module):
             self.image_unshuffle_factor = patch_size // sr_scale
             unshuffle_ch = in_channels * self.image_unshuffle_factor**2
             layers = [
-                nn.Conv2d(unshuffle_ch, hidden_dim, kernel_size=3, stride=1, padding=1,
-                          padding_mode=conv_padding_mode),
+                nn.Conv2d(unshuffle_ch, hidden_dim, kernel_size=3, stride=1, padding=1, padding_mode=conv_padding_mode),
                 nn.SiLU(),
-                nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1,
-                          padding_mode=conv_padding_mode),
+                nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1, padding_mode=conv_padding_mode),
             ]
             for _ in range(num_res_blocks):
                 layers.append(ResBlock(hidden_dim, conv_padding_mode=conv_padding_mode))
@@ -264,11 +257,11 @@ class LQProjection2D(nn.Module):
                 latent_proj_in_ch = effective_latent_channels * fold_factor**2
 
             layers = [
-                nn.Conv2d(latent_proj_in_ch, hidden_dim, kernel_size=3, stride=1, padding=1,
-                          padding_mode=conv_padding_mode),
+                nn.Conv2d(
+                    latent_proj_in_ch, hidden_dim, kernel_size=3, stride=1, padding=1, padding_mode=conv_padding_mode
+                ),
                 nn.SiLU(),
-                nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1,
-                          padding_mode=conv_padding_mode),
+                nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1, padding_mode=conv_padding_mode),
             ]
             for _ in range(num_res_blocks):
                 layers.append(ResBlock(hidden_dim, conv_padding_mode=conv_padding_mode))
@@ -363,7 +356,7 @@ class LQProjection2D(nn.Module):
         return block_idx
 
     def gate(
-        self, x: torch.Tensor, lq: torch.Tensor, sigma: Optional[torch.Tensor] = None, out_idx: int = 0
+        self, x: torch.Tensor, lq: torch.Tensor, sigma: torch.Tensor | None = None, out_idx: int = 0
     ) -> torch.Tensor:
         """Apply gating: inject lq features into transformer hidden state x."""
         return self.gate_modules[out_idx](x, lq, sigma=sigma)
@@ -413,7 +406,7 @@ class LQProjection2D(nn.Module):
 
     def _run_latent_proj(
         self, z_aligned: torch.Tensor, capture_aux_feature: bool = False
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run latent_proj and optionally tap a 1-based ResBlock output for aux RGB."""
         if not capture_aux_feature:
             return self.latent_proj(z_aligned), None
@@ -454,12 +447,12 @@ class LQProjection2D(nn.Module):
 
     def forward(
         self,
-        lq_video_or_image: Optional[torch.Tensor] = None,
-        lq_latent: Optional[torch.Tensor] = None,
+        lq_video_or_image: torch.Tensor | None = None,
+        lq_latent: torch.Tensor | None = None,
         target_ph: int = 0,
         target_pw: int = 0,
         return_aux: bool = False,
-    ) -> List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         """Project LQ inputs to patch-aligned token features.
 
         Returns:

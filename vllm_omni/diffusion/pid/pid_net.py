@@ -6,13 +6,12 @@
 #   - LQ projection: pid/_src/networks/lq_projection_2d.py
 
 import logging
-from typing import Optional
 
 import torch
 
+from .context_parallel import cat_outputs_cp_with_grad, split_inputs_cp
 from .lq_projection_2d import LQProjection2D
 from .pixeldit import PixDiT_T2I
-from .context_parallel import cat_outputs_cp_with_grad, split_inputs_cp
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +71,8 @@ class PidNet(PixDiT_T2I):
         ed_compress_ratio: int = 1,
         ed_depth_per_stage: int = 1,
         ed_window_size: int = 2,
-        ed_num_heads: Optional[int] = None,
-        ed_hidden_size: Optional[int] = None,
+        ed_num_heads: int | None = None,
+        ed_hidden_size: int | None = None,
         ed_use_token_shuffle: bool = True,
         # --- SR-specific args ---
         lq_inject_mode: str = "controlnet",

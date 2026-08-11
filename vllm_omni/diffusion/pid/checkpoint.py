@@ -25,14 +25,12 @@ def load_pid_checkpoint(
     Missing LQ-projection keys are expected when loading a checkpoint that
     was fine-tuned from a base T2I model (LQ modules are zero-init anyway).
     """
-    state_dict = torch.load(
-        checkpoint_path, map_location="cpu", weights_only=True
-    )
+    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
     net_sd = OrderedDict()
     for k, v in state_dict.items():
         if k.startswith("net.") and not k.startswith("net_ema."):
-            net_sd[k[len("net."):]] = v
+            net_sd[k[len("net.") :]] = v
 
     missing, unexpected = model.net.load_state_dict(net_sd, strict=False)
 

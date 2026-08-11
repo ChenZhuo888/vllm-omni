@@ -5,7 +5,6 @@
 # Adapted for vllm-omni: replaced imaginaire `distributed` import with
 # standard torch.distributed API (only `get_rank()` was used).
 
-from typing import Optional
 
 import torch
 from torch import Tensor
@@ -151,9 +150,7 @@ def robust_broadcast(tensor: torch.Tensor, src: int, pg: ProcessGroup, is_check_
     return tensor
 
 
-def broadcast(
-    item: torch.Tensor | str | None, process_group: Optional[ProcessGroup] = None
-) -> torch.Tensor | str | None:
+def broadcast(item: torch.Tensor | str | None, process_group: ProcessGroup | None = None) -> torch.Tensor | str | None:
     """
     Broadcast the item from the minimum rank in the specified group(s).
     """
@@ -173,7 +170,7 @@ def broadcast(
 def broadcast_split_tensor(
     tensor: torch.Tensor,
     seq_dim: int,
-    process_group: Optional[ProcessGroup] = None,
+    process_group: ProcessGroup | None = None,
 ) -> torch.Tensor:
     """
     Broadcast the tensor from the minimum rank in the specified group(s).

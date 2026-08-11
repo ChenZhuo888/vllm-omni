@@ -9,10 +9,11 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 
+from vllm_omni.platforms import current_omni_platform
+
 from .config import PID_SAMPLING_CONFIG
 from .pid_net import PidNet
 from .text_encoder import GemmaTextEncoder
-from vllm_omni.platforms import current_omni_platform
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +58,10 @@ class PidInferenceModel(nn.Module):
         _dtype_map = {
             "float32": torch.float32,
             "float16": torch.float16,
-            "bfloat16": torch.bfloat16, 
+            "bfloat16": torch.bfloat16,
         }
         if precision not in _dtype_map:
-            raise ValueError(
-                f"precision must be one of {list(_dtype_map)}, got {precision!r}"
-            )
+            raise ValueError(f"precision must be one of {list(_dtype_map)}, got {precision!r}")
         requested_dtype = _dtype_map[precision]
         if requested_dtype != torch.float32:
             self.autocast_dtype = requested_dtype
@@ -123,9 +122,7 @@ class PidInferenceModel(nn.Module):
             return ((x_t.double() - net_output.double()) / t_shaped).to(x_t.dtype)
         raise ValueError(f"Invalid prediction_type: {prediction_type}")
 
-    def _velocity_to_x0(
-        self, x_t: torch.Tensor, v: torch.Tensor, t: torch.Tensor
-    ) -> torch.Tensor:
+    def _velocity_to_x0(self, x_t: torch.Tensor, v: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """velocity -> x0: x0 = x_t - t * v (uses config prediction_type)."""
         return self._net_output_to_x0(x_t, v, t, self._cfg.prediction_type)
 
@@ -144,17 +141,15 @@ class PidInferenceModel(nn.Module):
         """
         if not current_omni_platform.supports_torch_inductor():
             logger.warning(
-                "PidInferenceModel: torch.compile skipped (platform %s does not "
-                "support inductor); running eager.", current_omni_platform.device_name
+                "PidInferenceModel: torch.compile skipped (platform %s does not support inductor); running eager.",
+                current_omni_platform.device_name,
             )
             return
         self._compile_enabled = True
         self._compile_mode = mode
         logger.info("PidInferenceModel: torch.compile armed (lazy, per resolution).")
 
-    def _maybe_compile_net(
-        self, image_h: int, image_w: int, text_len: int, device: torch.device
-    ) -> torch.nn.Module:
+    def _maybe_compile_net(self, image_h: int, image_w: int, text_len: int, device: torch.device) -> torch.nn.Module:
         """Return compiled net for this shape, or eager net if compile is off."""
         if not self._compile_enabled:
             return self.net
@@ -163,7 +158,8 @@ class PidInferenceModel(nn.Module):
         if compiled is None:
             logger.info(
                 "PidInferenceModel: warming pos caches + compiling net for %dx%d",
-                image_h, image_w,
+                image_h,
+                image_w,
             )
             self.net.precompute_positional_caches(
                 image_height=image_h,
@@ -172,9 +168,7 @@ class PidInferenceModel(nn.Module):
                 device=device,
                 pixel_dtype=self.precision,
             )
-            compiled = torch.compile(
-                self.net, mode=self._compile_mode, dynamic=False
-            )
+            compiled = torch.compile(self.net, mode=self._compile_mode, dynamic=False)
             self._compiled_nets[key] = compiled
         return compiled
 
@@ -184,13 +178,9 @@ class PidInferenceModel(nn.Module):
 
     def _get_t_list(self, device, num_steps: int | None = None) -> torch.Tensor:
         target = num_steps or self._cfg.student_sample_steps
-        full_t = torch.tensor(
-            self._cfg.student_t_list, device=device, dtype=torch.float32
-        )
+        full_t = torch.tensor(self._cfg.student_t_list, device=device, dtype=torch.float32)
         if target != len(full_t) - 1:
-            indices = (
-                torch.linspace(0, len(full_t) - 1, target + 1).round().long()
-            )
+            indices = torch.linspace(0, len(full_t) - 1, target + 1).round().long()
             return full_t[indices]
         return full_t
 
@@ -213,9 +203,7 @@ class PidInferenceModel(nn.Module):
         sample_type = getattr(self._cfg, "student_sample_type", "sde")
         prediction_type = getattr(self._cfg, "prediction_type", "velocity")
         autocast_ctx = (
-            torch.autocast(noise.device.type, dtype=self.autocast_dtype)
-            if self.autocast_dtype
-            else nullcontext()
+            torch.autocast(noise.device.type, dtype=self.autocast_dtype) if self.autocast_dtype else nullcontext()
         )
         if net is None:
             net = self.net
@@ -227,23 +215,25 @@ class PidInferenceModel(nn.Module):
                 t_scaled = t_cur_batch * timescale
 
                 v_pred = net(
-                    x, t_scaled, caption_embs,
+                    x,
+                    t_scaled,
+                    caption_embs,
                     lq_latent=lq_latent,
                     degrade_sigma=degrade_sigma,
                 )
 
                 if t_next.item() > 0:
                     if sample_type == "ode":
-                        v_for_step = self._net_output_to_velocity(
-                            x, v_pred, t_cur_batch, prediction_type
-                        )
+                        v_for_step = self._net_output_to_velocity(x, v_pred, t_cur_batch, prediction_type)
                         dt = t_next - t_cur
                         x = x + dt * v_for_step
                     else:
                         x0_pred = self._net_output_to_x0(x, v_pred, t_cur_batch, prediction_type)
                         eps_infer = torch.randn(
-                            x0_pred.shape, device=x0_pred.device,
-                            dtype=x0_pred.dtype, generator=generator,
+                            x0_pred.shape,
+                            device=x0_pred.device,
+                            dtype=x0_pred.dtype,
+                            generator=generator,
                         )
                         s = [B] + [1] * (x.ndim - 1)
                         t_next_bcast = t_next.reshape(1).expand(s)
@@ -260,9 +250,9 @@ class PidInferenceModel(nn.Module):
     @torch.no_grad()
     def generate_samples_from_batch(
         self,
-        lq_latent: torch.Tensor,        # (B, C_lq, zH, zW)
+        lq_latent: torch.Tensor,  # (B, C_lq, zH, zW)
         caption: str | list[str],
-        output_size: tuple[int, int],    # (H, W) pixel output
+        output_size: tuple[int, int],  # (H, W) pixel output
         degrade_sigma: float = 0.0,
         num_steps: int = 4,
         seed: int = 0,
@@ -286,7 +276,7 @@ class PidInferenceModel(nn.Module):
         # every fp32 Linear (AdaLN projections, controlnet gate) even under
         # autocast(bf16).  Restoring it costs nothing and keeps A100 perf
         # predictable.
-        #torch.backends.cuda.matmul.allow_tf32 = True
+        # torch.backends.cuda.matmul.allow_tf32 = True
 
         # Use tensor_kwargs (dtype-only; device derived from lq_latent at
         # call time) to match the original PixelDiTModel: the student was
@@ -300,9 +290,7 @@ class PidInferenceModel(nn.Module):
         caption_embs = caption_embs.to(**tensor_kwargs)
 
         lq_latent = lq_latent.to(**tensor_kwargs)
-        degrade_sigma_tensor = torch.full(
-            (B,), float(degrade_sigma), **tensor_kwargs
-        )
+        degrade_sigma_tensor = torch.full((B,), float(degrade_sigma), **tensor_kwargs)
 
         gen = torch.Generator(device=device).manual_seed(int(seed))
         img_h, img_w = output_size
@@ -316,12 +304,15 @@ class PidInferenceModel(nn.Module):
 
         if effective_steps == 1:
             t_student = torch.full(
-                (B,), self._cfg.student_t_list[0],
+                (B,),
+                self._cfg.student_t_list[0],
                 **tensor_kwargs,
             )
             t_scaled = t_student * self._cfg.fm_timescale
             v = net(
-                noise, t_scaled, caption_embs,
+                noise,
+                t_scaled,
+                caption_embs,
                 lq_latent=lq_latent,
                 degrade_sigma=degrade_sigma_tensor,
             )
@@ -329,8 +320,13 @@ class PidInferenceModel(nn.Module):
         else:
             t_list = self._get_t_list(device, effective_steps)
             x0 = self._sample_loop(
-                noise, t_list, caption_embs, lq_latent,
-                degrade_sigma_tensor, net=net, generator=gen,
+                noise,
+                t_list,
+                caption_embs,
+                lq_latent,
+                degrade_sigma_tensor,
+                net=net,
+                generator=gen,
             )
 
         return x0.clamp(-1, 1)

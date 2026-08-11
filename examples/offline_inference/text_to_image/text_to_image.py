@@ -354,7 +354,7 @@ def parse_args() -> argparse.Namespace:
         "--pid-enable",
         action="store_true",
         default=False,
-        help="Enable PiD super-resolution decode (replaces VAE decode). "
+        help="Enable PiD super-resolution decode (replaces VAE decode). ",
     )
     parser.add_argument(
         "--pid-checkpoint",

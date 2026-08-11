@@ -8,8 +8,8 @@ compatible with PiD's LQ projection.
 
 from .checkpoint import load_pid_checkpoint
 from .config import (
-    FLUX_PID_NET_CONFIG,
     FLUX2_PID_NET_CONFIG,
+    FLUX_PID_NET_CONFIG,
     PID_SAMPLING_CONFIG,
     QWENIMAGE_PID_NET_CONFIG,
     SD3_PID_NET_CONFIG,

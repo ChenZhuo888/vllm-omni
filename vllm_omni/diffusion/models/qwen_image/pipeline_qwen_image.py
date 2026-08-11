@@ -32,11 +32,11 @@ from vllm_omni.diffusion.models.interface import SupportsComponentDiscovery
 from vllm_omni.diffusion.models.qwen_image.cfg_parallel import (
     QwenImageCFGParallelMixin,
 )
-from vllm_omni.diffusion.pid import PidDecodeMixin
 from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
     QwenImageTransformer2DModel,
 )
 from vllm_omni.diffusion.models.qwen_image.rope_utils import txt_seq_lens_from_embeds
+from vllm_omni.diffusion.pid import PidDecodeMixin
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.utils.prompt_utils import (
     validate_prompt_sequence_lengths,
@@ -1095,7 +1095,7 @@ class QwenImagePipeline(
         self._current_timestep = None
         self._pid_override = getattr(common_sampling_params, "pid_decode", None)
         self._pid_caption = prompt
-        
+
         result = self._decode_latents(latents, height, width, output_type)
         return split_diffusion_output_by_request(
             result,

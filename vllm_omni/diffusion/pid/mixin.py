@@ -65,9 +65,7 @@ class PidDecodeMixin:
             return
 
         if not self.PID_BACKBONE:
-            raise RuntimeError(
-                f"{type(self).__name__} must set PID_BACKBONE to use PiD."
-            )
+            raise RuntimeError(f"{type(self).__name__} must set PID_BACKBONE to use PiD.")
 
         decoder = PidDecoder(
             config=self._pid_config,
@@ -98,9 +96,7 @@ class PidDecodeMixin:
             return raw
         if isinstance(raw, dict):
             return PidDecodeConfig(**raw)
-        raise TypeError(
-            f"pid_decode must be PidDecodeConfig, dict, or None, got {type(raw)!r}"
-        )
+        raise TypeError(f"pid_decode must be PidDecodeConfig, dict, or None, got {type(raw)!r}")
 
     # -- decode hook -------------------------------------------------------
 
@@ -138,9 +134,7 @@ class PidDecodeMixin:
                 )
             if pid_decoder is not None and pid_config is not None:
                 overrides = {
-                    k: pid_override[k]
-                    for k in ("scale", "num_steps", "seed", "degrade_sigma")
-                    if k in pid_override
+                    k: pid_override[k] for k in ("scale", "num_steps", "seed", "degrade_sigma") if k in pid_override
                 }
                 if overrides:
                     pid_config = _dc_replace(pid_config, **overrides)
@@ -154,10 +148,7 @@ class PidDecodeMixin:
             return None
 
         if caption is None:
-            logger.warning(
-                "PiD decode is enabled but no caption was provided; "
-                "falling back to an empty prompt."
-            )
+            logger.warning("PiD decode is enabled but no caption was provided; falling back to an empty prompt.")
             caption = ""
 
         lq_latent = latents_4d.squeeze(2) if latents_4d.dim() == 5 else latents_4d

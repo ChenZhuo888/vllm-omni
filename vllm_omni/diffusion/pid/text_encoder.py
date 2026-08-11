@@ -54,9 +54,7 @@ class GemmaTextEncoder(nn.Module):
     ):
         super().__init__()
         if precision not in _DTYPE_MAP:
-            raise ValueError(
-                f"precision must be one of {list(_DTYPE_MAP)}, got {precision!r}"
-            )
+            raise ValueError(f"precision must be one of {list(_DTYPE_MAP)}, got {precision!r}")
         dtype = _DTYPE_MAP[precision]
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)

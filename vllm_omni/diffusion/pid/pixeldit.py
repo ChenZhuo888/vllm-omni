@@ -11,7 +11,6 @@
 # Only import statements were changed (everything is now local). Logic is unchanged.
 
 import math
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -209,7 +208,7 @@ def apply_rotary_emb(
     xq: torch.Tensor,
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     # freqs_cis: real (cos, sin) tensor [N, head_dim//2, 2] (see `_interleave_cos_sin`).
     # Apply RoPE as an explicit 2x2 rotation on each (real, imag) pair of q/k —
     # bit-equivalent to the old complex multiply, but traceable by torch.compile.
@@ -251,9 +250,9 @@ class RotaryAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         # Context-parallel group; when set, `forward` runs split-Q / gather-K,V.
-        self._cp_group: Optional[ProcessGroup] = None
+        self._cp_group: ProcessGroup | None = None
 
-    def set_context_parallel_group(self, cp_group: Optional[ProcessGroup]):
+    def set_context_parallel_group(self, cp_group: ProcessGroup | None):
         self._cp_group = cp_group
 
     def forward(self, x: torch.Tensor, pos, mask) -> torch.Tensor:
@@ -437,8 +436,8 @@ class PiTBlock(nn.Module):
         patch_size: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
-        attn_hidden_size: Optional[int] = None,
-        attn_num_heads: Optional[int] = None,
+        attn_hidden_size: int | None = None,
+        attn_num_heads: int | None = None,
         rope_mode: str = "original",
         rope_ref_grid_h: int = 32,
         rope_ref_grid_w: int = 32,
@@ -463,9 +462,9 @@ class PiTBlock(nn.Module):
         self.adaLN_modulation = nn.Sequential(nn.Linear(self.context_dim, 6 * self.pixel_dim * p2, bias=True))
         self._pos_cache = dict()
         # CP group; when set, the attention runs split-Q / gather-K,V across L.
-        self._cp_group: Optional[ProcessGroup] = None
+        self._cp_group: ProcessGroup | None = None
 
-    def set_context_parallel_group(self, cp_group: Optional[ProcessGroup]):
+    def set_context_parallel_group(self, cp_group: ProcessGroup | None):
         self._cp_group = cp_group
         self.attn.set_context_parallel_group(cp_group)
 
@@ -562,9 +561,9 @@ class MMDiTJointAttention(nn.Module):
         self.proj_drop_x = nn.Dropout(proj_drop)
         self.proj_drop_y = nn.Dropout(proj_drop)
         # CP group for the image stream. Text is replicated across CP ranks.
-        self._cp_group: Optional[ProcessGroup] = None
+        self._cp_group: ProcessGroup | None = None
 
-    def set_context_parallel_group(self, cp_group: Optional[ProcessGroup]):
+    def set_context_parallel_group(self, cp_group: ProcessGroup | None):
         self._cp_group = cp_group
 
     def forward(
@@ -574,7 +573,7 @@ class MMDiTJointAttention(nn.Module):
         pos_img: torch.Tensor,  # [Nx_full, head_dim/2] complex RoPE freqs (always full)
         pos_txt: torch.Tensor = None,  # [Ny, head_dim/2] complex RoPE freqs for text (optional)
         attn_mask: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         B, Nx, C = x.shape
         By, Ny, Cy = y.shape
         assert B == By and C == Cy, "x and y must share batch and channel dims"
@@ -672,16 +671,18 @@ class MMDiTBlockT2I(nn.Module):
             else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
         )
 
-    def set_context_parallel_group(self, cp_group: Optional[ProcessGroup]):
+    def set_context_parallel_group(self, cp_group: ProcessGroup | None):
         # The block itself has no CP-affecting state; only the joint attention does.
         self.attn.set_context_parallel_group(cp_group)
 
     def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None):
         # c: [B, 1, C] typically, broadcast across tokens
-        shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.ada_ln_modulation_img(c) \
-        .chunk(6, dim=-1)
-        shift_msa_y, scale_msa_y, gate_msa_y, shift_mlp_y, scale_mlp_y, gate_mlp_y = self.ada_ln_modulation_txt(c) \
-        .chunk(6, dim=-1)
+        shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.ada_ln_modulation_img(
+            c
+        ).chunk(6, dim=-1)
+        shift_msa_y, scale_msa_y, gate_msa_y, shift_mlp_y, scale_mlp_y, gate_mlp_y = self.ada_ln_modulation_txt(
+            c
+        ).chunk(6, dim=-1)
 
         # 1) Joint attention with dual-stream
         x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
@@ -818,9 +819,9 @@ class _TransformerBlock(nn.Module):
         x: torch.Tensor,
         c: torch.Tensor,
         pos: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
+        mask: torch.Tensor | None = None,
+        height: int | None = None,
+        width: int | None = None,
     ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
         use_ts = (
@@ -1112,8 +1113,8 @@ class PixDiT_T2I(nn.Module):
         ed_compress_ratio: int = 1,
         ed_depth_per_stage: int = 1,
         ed_window_size: int = 2,
-        ed_num_heads: Optional[int] = None,
-        ed_hidden_size: Optional[int] = None,
+        ed_num_heads: int | None = None,
+        ed_hidden_size: int | None = None,
         ed_use_token_shuffle: bool = True,
     ):
         super().__init__()
@@ -1197,13 +1198,13 @@ class PixDiT_T2I(nn.Module):
         self.ed_num_heads = int(ed_num_heads) if ed_num_heads is not None else self.num_groups
         self.ed_hidden_size = int(ed_hidden_size) if ed_hidden_size is not None else self.hidden_size
         self.ed_use_token_shuffle = bool(ed_use_token_shuffle)
-        self.encoder_ed: Optional[_EncoderED] = None
-        self.decoder_ed: Optional[_DecoderED] = None
-        self.s_ed_proj_in: Optional[nn.Module] = None
-        self.s_ed_proj_out: Optional[nn.Module] = None
-        self.s_ed_cond_proj: Optional[nn.Module] = None
-        self.s_ed_in_norm: Optional[RMSNorm] = None
-        self.s_ed_out_norm: Optional[RMSNorm] = None
+        self.encoder_ed: _EncoderED | None = None
+        self.decoder_ed: _DecoderED | None = None
+        self.s_ed_proj_in: nn.Module | None = None
+        self.s_ed_proj_out: nn.Module | None = None
+        self.s_ed_cond_proj: nn.Module | None = None
+        self.s_ed_in_norm: RMSNorm | None = None
+        self.s_ed_out_norm: RMSNorm | None = None
         num_stages = _compute_num_stages_from_ratio(self.ed_compress_ratio) if self.enable_ed else 0
         self.use_ed = self.enable_ed and num_stages > 0
         if self.use_ed:
@@ -1258,7 +1259,7 @@ class PixDiT_T2I(nn.Module):
         # are responsible for splitting along L in `forward` and gathering
         # before the final fold. This attribute is propagated to every patch
         # block (joint MMDiT attention) and pixel block (RotaryAttention).
-        self._cp_group: Optional[ProcessGroup] = None
+        self._cp_group: ProcessGroup | None = None
         self._is_context_parallel_enabled: bool = False
 
     @property

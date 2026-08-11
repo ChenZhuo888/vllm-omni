@@ -115,6 +115,7 @@ PID_SAMPLING_CONFIG = dict(
 @dataclass
 class PidNetConfig:
     """Typed wrapper for a backbone-specific PidNet constructor args."""
+
     backbone: Literal["qwenimage", "flux", "sd3", "sdxl", "flux2"] = "qwenimage"
     net_kwargs: dict = field(default_factory=lambda: dict(QWENIMAGE_PID_NET_CONFIG))
 
@@ -122,12 +123,14 @@ class PidNetConfig:
 @dataclass
 class PidSamplingConfig:
     """Typed wrapper for sampling parameters."""
+
     sampling_kwargs: dict = field(default_factory=lambda: dict(PID_SAMPLING_CONFIG))
 
 
 # ---------------------------------------------------------------------------
 # Convenience getters
 # ---------------------------------------------------------------------------
+
 
 def get_pid_net_config(backbone: str) -> dict:
     """Return the net config dict for ``backbone``."""

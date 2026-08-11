@@ -16,13 +16,13 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
+from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.pid.checkpoint import load_pid_checkpoint
 from vllm_omni.diffusion.pid.config import (
     PID_SAMPLING_CONFIG,
     get_pid_net_config,
 )
 from vllm_omni.diffusion.pid.pid_model import PidInferenceModel
-from vllm_omni.diffusion.distributed.utils import get_local_device
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +145,7 @@ class PidDecoder(nn.Module):
             lq_latent=lq_latent,
             caption=caption,
             output_size=output_size,
-            degrade_sigma=(
-                degrade_sigma
-                if degrade_sigma is not None
-                else self._config.degrade_sigma
-            ),
+            degrade_sigma=(degrade_sigma if degrade_sigma is not None else self._config.degrade_sigma),
             num_steps=num_steps or self._config.num_steps,
             seed=seed if seed is not None else self._config.seed,
         )
