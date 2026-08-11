@@ -32,14 +32,6 @@ def text_to_video() -> ModuleType:
     )
 
 
-@pytest.fixture(scope="module")
-def image_to_video() -> ModuleType:
-    return _load_example(
-        "magi2_image_to_video_example",
-        "examples/offline_inference/image_to_video/image_to_video.py",
-    )
-
-
 @pytest.mark.parametrize(
     ("extra_body", "expected_size"),
     [
@@ -62,50 +54,6 @@ def test_shared_text_to_video_uses_native_preview_defaults(
     assert preset["num_frames"] == 125
     assert preset["num_inference_steps"] == 100
     assert preset["fps"] == 12.5
-
-
-@pytest.mark.parametrize(
-    ("extra_body", "expected_size"),
-    [
-        (None, (896, 512)),
-        ({"resolution": "540p"}, (896, 512)),
-        ({"resolution": "272p"}, (448, 256)),
-    ],
-)
-def test_shared_image_to_video_uses_native_preview_defaults(
-    image_to_video: ModuleType,
-    extra_body: dict[str, object] | None,
-    expected_size: tuple[int, int],
-) -> None:
-    assert image_to_video._magi2_preview_dimensions(extra_body) == expected_size
-
-
-@pytest.mark.parametrize("example_fixture", ["text_to_video", "image_to_video"])
-def test_shared_video_dlo_cli_forwards_rank_local_options(
-    example_fixture: str,
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    example = request.getfixturevalue(example_fixture)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            str(example.__file__),
-            "--enable-distributed-layerwise-offload",
-            "--dlo-no-use-allgather",
-            "--dlo-resident-layers",
-            "7",
-        ],
-    )
-
-    args = example.parse_args()
-
-    assert example._distributed_layerwise_offload_kwargs(args) == {
-        "enable_distributed_layerwise_offload": True,
-        "dlo_use_allgather": False,
-        "dlo_resident_layers": 7,
-    }
 
 
 def test_shared_text_to_video_forwards_hsdp_cli(text_to_video: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:

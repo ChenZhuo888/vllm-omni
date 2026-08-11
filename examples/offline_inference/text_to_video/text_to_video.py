@@ -10,23 +10,15 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm_omni.diffusion.data import DiffusionParallelConfig
+from vllm_omni.diffusion.data import DiffusionParallelConfig, resolve_model_class_name
 from vllm_omni.diffusion.utils.param_utils import apply_declared_extra_args
 from vllm_omni.entrypoints.omni import Omni
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
-from vllm_omni.model_extras import get_extra_body_params, get_model_class_name
+from vllm_omni.model_extras import get_extra_body_params, get_model_class_name, get_video_generation_defaults
 from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.platforms import current_omni_platform
 
 _MODEL_PRESETS = {
-    "magi2": {
-        "height": 512,
-        "width": 896,
-        "num_frames": 125,
-        "num_inference_steps": 100,
-        "fps": 12.5,
-        "output": "magi2_output.mp4",
-    },
     "vace": {
         "height": 480,
         "width": 832,
@@ -113,32 +105,17 @@ _MODEL_PRESETS = {
 }
 
 
-def _magi2_preview_preset(extra_body: dict[str, Any] | None = None) -> dict[str, Any]:
-    resolution = str((extra_body or {}).get("resolution", "540p")).lower()
-    if resolution == "272p":
-        width, height = 448, 256
-    elif resolution == "540p":
-        width, height = 896, 512
-    else:
-        raise ValueError("MAGI-2 Preview resolution must be '272p' or '540p'.")
-    return {**_MODEL_PRESETS["magi2"], "height": height, "width": width}
-
-
-def _is_magi2_model(model: str, model_class_name: str | None = None) -> bool:
-    model_lower = model.lower()
-    class_lower = (model_class_name or "").lower()
-    return "magi2" in class_lower or "magi-2" in model_lower or "magi2" in model_lower
-
-
 def _detect_preset(
     model: str,
     model_class_name: str | None = None,
     extra_body: dict[str, Any] | None = None,
 ) -> dict:
     model_lower = model.lower()
-    class_lower = (model_class_name or "").lower()
-    if _is_magi2_model(model, model_class_name):
-        return _magi2_preview_preset(extra_body)
+    resolved_model_class_name = model_class_name or resolve_model_class_name(model)
+    class_lower = (resolved_model_class_name or "").lower()
+    video_defaults = get_video_generation_defaults(resolved_model_class_name, extra_body)
+    if video_defaults is not None:
+        return video_defaults.cli_defaults()
     if "distilled" in class_lower or "distilled" in model_lower:
         return _MODEL_PRESETS["ltx2_distilled"]
     if "ltx23" in class_lower or "ltx-2.3" in model_lower or "ltx_2.3" in model_lower:
@@ -184,15 +161,6 @@ def parse_extra_body(value: str) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise argparse.ArgumentTypeError("--extra-body must be a JSON object")
     return body
-
-
-def _distributed_layerwise_offload_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Return the distributed layerwise offload options forwarded to Omni."""
-    return {
-        "enable_distributed_layerwise_offload": args.enable_distributed_layerwise_offload,
-        "dlo_use_allgather": args.dlo_use_allgather,
-        "dlo_resident_layers": args.dlo_resident_layers,
-    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -457,9 +425,10 @@ def _parallel_config_from_args(args: argparse.Namespace) -> DiffusionParallelCon
 def main():
     args = parse_args()
     model_class_name = args.model_class_name
-    is_magi2 = _is_magi2_model(args.model, model_class_name)
+    resolved_model_class_name = model_class_name or resolve_model_class_name(args.model)
+    video_defaults = get_video_generation_defaults(resolved_model_class_name, args.extra_body)
 
-    preset = _detect_preset(args.model, model_class_name, args.extra_body)
+    preset = _detect_preset(args.model, resolved_model_class_name, args.extra_body)
     for key, default_val in preset.items():
         if getattr(args, key.replace("-", "_"), None) is None:
             setattr(args, key.replace("-", "_"), default_val)
@@ -499,8 +468,10 @@ def main():
         cache_config=cache_config,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
         profiler_config=args.profiler_config,
+        enable_distributed_layerwise_offload=args.enable_distributed_layerwise_offload,
+        dlo_use_allgather=args.dlo_use_allgather,
+        dlo_resident_layers=args.dlo_resident_layers,
     )
-    omni_kwargs.update(_distributed_layerwise_offload_kwargs(args))
     if args.deploy_config:
         omni_kwargs["deploy_config"] = args.deploy_config
     if args.boundary_ratio is not None:
@@ -545,7 +516,10 @@ def main():
     prompt_dict = {"prompt": args.prompt}
     if args.negative_prompt is not None:
         prompt_dict["negative_prompt"] = args.negative_prompt
-    elif not is_magi2 and preset not in (_MODEL_PRESETS["ltx2"], _MODEL_PRESETS["ltx23"]):
+    elif video_defaults is not None:
+        if video_defaults.default_negative_prompt is not None:
+            prompt_dict["negative_prompt"] = video_defaults.default_negative_prompt
+    elif preset not in (_MODEL_PRESETS["ltx2"], _MODEL_PRESETS["ltx23"]):
         # Preserve the historical empty-prompt behavior for non-LTX examples.
         prompt_dict["negative_prompt"] = ""
 

@@ -56,7 +56,8 @@ import numpy as np
 import PIL.Image
 import torch
 
-from vllm_omni.diffusion.data import DiffusionParallelConfig
+from vllm_omni.diffusion.data import DiffusionParallelConfig, resolve_model_class_name
+from vllm_omni.diffusion.model_metadata import get_diffusion_model_metadata
 from vllm_omni.diffusion.utils.param_utils import apply_declared_extra_args
 from vllm_omni.entrypoints.omni import Omni
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
@@ -64,6 +65,7 @@ from vllm_omni.model_extras import (
     build_image_to_video_prompt,
     get_extra_body_params,
     get_model_class_name,
+    get_video_generation_defaults,
 )
 from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.platforms import current_omni_platform
@@ -81,15 +83,6 @@ def parse_json_object(value: str, flag_name: str = "argument") -> dict[str, Any]
 
 
 parse_profiler_config = functools.partial(parse_json_object, flag_name="--profiler-config")
-
-
-def _distributed_layerwise_offload_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Return the distributed layerwise offload options forwarded to Omni."""
-    return {
-        "enable_distributed_layerwise_offload": args.enable_distributed_layerwise_offload,
-        "dlo_use_allgather": args.dlo_use_allgather,
-        "dlo_resident_layers": args.dlo_resident_layers,
-    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -357,27 +350,20 @@ def calculate_dimensions(
     return height, width
 
 
-def _magi2_preview_dimensions(extra_body: dict[str, Any] | None = None) -> tuple[int, int]:
-    resolution = str((extra_body or {}).get("resolution", "540p")).lower()
-    if resolution == "272p":
-        return 448, 256
-    if resolution == "540p":
-        return 896, 512
-    raise ValueError("MAGI-2 Preview resolution must be '272p' or '540p'.")
-
-
 def main():
     args = parse_args()
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(args.seed)
     model_name = str(args.model).lower() if args.model is not None else ""
     model_class_name = args.model_class_name
-    model_class_name_lower = (model_class_name or "").lower()
+    resolved_model_class_name = model_class_name or resolve_model_class_name(args.model)
+    model_class_name_lower = (resolved_model_class_name or "").lower()
+    video_defaults = get_video_generation_defaults(resolved_model_class_name, args.extra_body)
+    resize_input_images = get_diffusion_model_metadata(resolved_model_class_name).resize_reference_images_to_output
     is_ltx2_distilled = "distilled" in model_class_name_lower or "distilled" in model_name
     is_ltx23 = "ltx23" in model_class_name_lower or "ltx-2.3" in model_name
     is_ltx2 = is_ltx2_distilled or is_ltx23 or "ltx2" in model_class_name_lower or "ltx-2" in model_name
-    is_cosmos = "cosmos" in model_name or (model_class_name is not None and "cosmos" in model_class_name.lower())
+    is_cosmos = "cosmos" in model_name or "cosmos" in model_class_name_lower
     is_cosmos_edge = is_cosmos and ("edge" in model_name or "edge" in model_class_name_lower)
-    is_magi2 = "magi2" in model_class_name_lower or "magi-2" in model_name or "magi2" in model_name
 
     image = PIL.Image.open(args.image).convert("RGB") if args.image else None
     last_image = PIL.Image.open(args.last_image).convert("RGB") if args.last_image else None
@@ -391,18 +377,15 @@ def main():
 
     # Per-model generation defaults, applied only when the matching flag is omitted.
     # Cosmos3 would otherwise silently inherit the Wan2.2 defaults (wrong size/steps/shift).
-    magi2_default_width = None
-    magi2_default_height = None
-    if is_magi2:
-        magi2_default_width, magi2_default_height = _magi2_preview_dimensions(args.extra_body)
+    if video_defaults is not None:
         d_fps, d_guidance, d_num_frames, d_steps, d_flow_shift, d_max_area, d_mod = (
-            12.5,
-            None,
-            125,
-            100,
-            None,
-            magi2_default_width * magi2_default_height,
-            16,
+            video_defaults.fps,
+            video_defaults.guidance_scale,
+            video_defaults.num_frames,
+            video_defaults.num_inference_steps,
+            video_defaults.flow_shift,
+            video_defaults.max_area,
+            video_defaults.dimension_multiple,
         )
     elif is_cosmos_edge:
         # Cosmos3-Edge native defaults: 480x832, gs 5.0, flow_shift 3.0 — NOT the Nano/Super
@@ -459,9 +442,9 @@ def main():
     # Calculate dimensions if not provided (model-aware max area).
     height = args.height
     width = args.width
-    if is_magi2:
-        height = height or magi2_default_height
-        width = width or magi2_default_width
+    if video_defaults is not None:
+        height = height or video_defaults.height
+        width = width or video_defaults.width
     elif height is None or width is None:
         calc_height, calc_width = calculate_dimensions(dimension_image, max_area=d_max_area, mod_value=d_mod)
         height = height or calc_height
@@ -469,9 +452,9 @@ def main():
 
     media_inputs: dict[str, Any] = {}
     if image is not None:
-        # The native MAGI-2 conditioning path performs an aspect-preserving
-        # crop/resize. Keep the source geometry intact until that step.
-        media_inputs["image"] = image if is_magi2 else image.resize((width, height), PIL.Image.Resampling.LANCZOS)
+        media_inputs["image"] = (
+            image if not resize_input_images else image.resize((width, height), PIL.Image.Resampling.LANCZOS)
+        )
     if last_image is not None:
         media_inputs["last_image"] = last_image.resize((width, height), PIL.Image.Resampling.LANCZOS)
     if mask_image is not None:
@@ -541,8 +524,10 @@ def main():
         cache_config=cache_config,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
         profiler_config=args.profiler_config,
+        enable_distributed_layerwise_offload=args.enable_distributed_layerwise_offload,
+        dlo_use_allgather=args.dlo_use_allgather,
+        dlo_resident_layers=args.dlo_resident_layers,
     )
-    omni_kwargs.update(_distributed_layerwise_offload_kwargs(args))
     if args.deploy_config:
         omni_kwargs["deploy_config"] = args.deploy_config
     if flow_shift is not None:
@@ -580,9 +565,12 @@ def main():
     print(f"{'=' * 60}\n")
 
     negative_prompt = args.negative_prompt
-    if negative_prompt is None and not is_ltx2 and not is_magi2:
-        # Preserve the historical empty-prompt behavior for non-LTX examples.
-        negative_prompt = ""
+    if negative_prompt is None:
+        if video_defaults is not None:
+            negative_prompt = video_defaults.default_negative_prompt
+        elif not is_ltx2:
+            # Preserve the historical empty-prompt behavior for non-LTX examples.
+            negative_prompt = ""
     prompt_dict = build_image_to_video_prompt(
         model_class_name=model_class_name,
         prompt=args.prompt,

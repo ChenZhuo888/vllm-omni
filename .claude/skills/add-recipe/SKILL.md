@@ -22,7 +22,7 @@ Read only the contributor and user documentation relevant to the model:
 | Family | Contributor guide | User-facing documentation to synchronize |
 |---|---|---|
 | Diffusion | [`adding a diffusion model`](../add-diffusion-model/SKILL.md) | `docs/user_guide/diffusion_features.md`, applicable diffusion feature guides, and shared image/video/audio examples |
-| TTS | [`adding a TTS model`](../../../docs/contributing/model/adding_tts_model.md) | `examples/offline_inference/text_to_speech/README.md`, `examples/online_serving/text_to_speech/README.md`, and `docs/serving/speech_api.md` |
+| TTS | [`adding a TTS model`](../add-tts-model/SKILL.md) | `examples/offline_inference/text_to_speech/README.md`, `examples/online_serving/text_to_speech/README.md`, and `docs/serving/speech_api.md` |
 | Omni | [`adding an omni model`](../../../docs/contributing/model/adding_omni_model.md) | model-family offline/online example docs, `docs/serving/chat_completions_api.md`, and `docs/user_guide/feature_compatibility.md` |
 
 All families must update `docs/models/supported_models.md` and the matching row
