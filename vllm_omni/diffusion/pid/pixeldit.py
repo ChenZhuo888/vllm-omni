@@ -20,6 +20,8 @@ from torch.nn.functional import scaled_dot_product_attention
 
 from .context_parallel import cat_outputs_cp_with_grad
 
+from vllm.model_executor.layers.linear import ReplicatedLinear
+
 # =============================================================================
 # From pixdit_core/modules.py
 # =============================================================================
@@ -129,12 +131,43 @@ class RMSNorm(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        quant_config=None,
+        prefix: str = "",
+    ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+
+        self.w1 = ReplicatedLinear(
+            dim,
+            hidden_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w1",
+            return_bias=False,
+            disable_tp=True
+        )
+        self.w3 = ReplicatedLinear(
+            dim,
+            hidden_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w3",
+            return_bias=False,
+            disable_tp=True
+        )
+        self.w2 = ReplicatedLinear(
+            hidden_dim,
+            dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w2",
+            return_bias=False,
+            disable_tp=True
+        )
 
     def forward(self, x):
         x = self.w2(torch.nn.functional.silu(self.w1(x)) * self.w3(x))
@@ -640,7 +673,8 @@ class MMDiTJointAttention(nn.Module):
 
 
 class MMDiTBlockT2I(nn.Module):
-    def __init__(self, hidden_size, groups, mlp_ratio=4.0, ada_ln_modulation_img=None, ada_ln_modulation_txt=None):
+    def __init__(self, hidden_size, groups, mlp_ratio=4.0, ada_ln_modulation_img=None, ada_ln_modulation_txt=None,
+                 quant_config=None, prefix=""):
         super().__init__()
         self.hidden_size = hidden_size
         self.groups = groups
@@ -656,8 +690,8 @@ class MMDiTBlockT2I(nn.Module):
         self.norm_y2 = RMSNorm(hidden_size, eps=1e-6)
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        self.mlp_x = FeedForward(hidden_size, mlp_hidden_dim)
-        self.mlp_y = FeedForward(hidden_size, mlp_hidden_dim)
+        self.mlp_x = FeedForward(hidden_size, mlp_hidden_dim, quant_config=quant_config, prefix=f"{prefix}.mlp_x")
+        self.mlp_y = FeedForward(hidden_size, mlp_hidden_dim, quant_config=quant_config, prefix=f"{prefix}.mlp_y")
 
         # Per-stream AdaLN modulation
         self.ada_ln_modulation_img = (
@@ -1116,6 +1150,8 @@ class PixDiT_T2I(nn.Module):
         ed_num_heads: int | None = None,
         ed_hidden_size: int | None = None,
         ed_use_token_shuffle: bool = True,
+        quant_config=None,
+        prefix=""
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -1157,8 +1193,10 @@ class PixDiT_T2I(nn.Module):
                     self.num_groups,
                     ada_ln_modulation_img=self._shared_cond_adaln_img,
                     ada_ln_modulation_txt=self._shared_cond_adaln_txt,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}patch_blocks.{i}"
                 )
-                for _ in range(self.patch_depth)
+                for i in range(self.patch_depth)
             ]
         )
         # Remove AdaLN-based text refinement; PixDiT keeps cross-attn-only text handling

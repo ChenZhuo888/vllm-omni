@@ -9,6 +9,8 @@ from collections import OrderedDict
 
 import torch
 
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,9 +32,36 @@ def load_pid_checkpoint(
     net_sd = OrderedDict()
     for k, v in state_dict.items():
         if k.startswith("net.") and not k.startswith("net_ema."):
-            net_sd[k[len("net.") :]] = v
+            name = k[len("net."):]
+            name = _remap_pid_checkpoint_key(name)
+            net_sd[name] = v
 
-    missing, unexpected = model.net.load_state_dict(net_sd, strict=False)
+    params_dict = dict(model.net.named_parameters())
+
+    loaded_params = set()
+    unexpected = []
+
+    for name, loaded_weight in net_sd.items():
+        param = params_dict.get(name)
+
+        if param is None:
+            unexpected.append(name)
+            continue
+
+        weight_loader = getattr(
+            param,
+            "weight_loader",
+            default_weight_loader,
+        )
+        weight_loader(param, loaded_weight)
+
+        loaded_params.add(name)
+
+    missing = [
+        name
+        for name in params_dict
+        if name not in loaded_params
+    ]
 
     lq_missing = [k for k in missing if "lq_proj" in k or "pit_lq" in k]
     other_missing = [k for k in missing if "lq_proj" not in k and "pit_lq" not in k]
@@ -46,3 +75,14 @@ def load_pid_checkpoint(
         logger.warning("Missing keys: %s", other_missing)
     if unexpected:
         logger.warning("Unexpected keys: %s", unexpected)
+
+def _remap_pid_checkpoint_key(key: str) -> str:
+    key = key.replace(
+        ".adaLN_modulation_img.",
+        ".ada_ln_modulation_img.",
+    )
+    key = key.replace(
+        ".adaLN_modulation_txt.",
+        ".ada_ln_modulation_txt.",
+    )
+    return key
