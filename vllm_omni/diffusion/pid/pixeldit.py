@@ -20,6 +20,8 @@ from torch.nn.functional import scaled_dot_product_attention
 
 from .context_parallel import cat_outputs_cp_with_grad
 
+from vllm.model_executor.layers.linear import ReplicatedLinear
+
 # =============================================================================
 # From pixdit_core/modules.py
 # =============================================================================
@@ -129,12 +131,43 @@ class RMSNorm(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        quant_config=None,
+        prefix: str = "",
+    ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+
+        self.w1 = ReplicatedLinear(
+            dim,
+            hidden_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w1",
+            return_bias=False,
+            disable_tp=True
+        )
+        self.w3 = ReplicatedLinear(
+            dim,
+            hidden_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w3",
+            return_bias=False,
+            disable_tp=True
+        )
+        self.w2 = ReplicatedLinear(
+            hidden_dim,
+            dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w2",
+            return_bias=False,
+            disable_tp=True
+        )
 
     def forward(self, x):
         x = self.w2(torch.nn.functional.silu(self.w1(x)) * self.w3(x))
@@ -234,6 +267,8 @@ class RotaryAttention(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         norm_layer: nn.Module = RMSNorm,
+        quant_config=None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
@@ -243,11 +278,26 @@ class RotaryAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkv = ReplicatedLinear(
+            dim,
+            dim * 3,
+            bias=qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv",
+            return_bias=False,
+        )
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
+        self.proj = ReplicatedLinear(
+            dim,
+            dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+            return_bias=False,
+        )
         self.proj_drop = nn.Dropout(proj_drop)
         # Context-parallel group; when set, `forward` runs split-Q / gather-K,V.
         self._cp_group: ProcessGroup | None = None
@@ -441,6 +491,8 @@ class PiTBlock(nn.Module):
         rope_mode: str = "original",
         rope_ref_grid_h: int = 32,
         rope_ref_grid_w: int = 32,
+        quant_config=None,
+        prefix: str = "",
     ):
         super().__init__()
         self.pixel_dim = int(pixel_hidden_size)
@@ -453,10 +505,30 @@ class PiTBlock(nn.Module):
         self.rope_ref_grid_w = rope_ref_grid_w
         assert self.attn_dim % self.num_heads == 0, "pixel attention hidden size must be divisible by pixel num_heads"
         p2 = self.patch_size * self.patch_size
-        self.compress_to_attn = nn.Linear(p2 * self.pixel_dim, self.attn_dim, bias=True)
-        self.expand_from_attn = nn.Linear(self.attn_dim, p2 * self.pixel_dim, bias=True)
+        self.compress_to_attn = ReplicatedLinear(
+            p2 * self.pixel_dim,
+            self.attn_dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.compress_to_attn",
+            return_bias=False,
+        )
+        self.expand_from_attn = ReplicatedLinear(
+            self.attn_dim,
+            p2 * self.pixel_dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.expand_from_attn",
+            return_bias=False,
+        )
         self.norm1 = RMSNorm(self.pixel_dim, eps=1e-6)
-        self.attn = RotaryAttention(self.attn_dim, num_heads=self.num_heads, qkv_bias=False)
+        self.attn = RotaryAttention(
+            self.attn_dim,
+            num_heads=self.num_heads,
+            qkv_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
         self.norm2 = RMSNorm(self.pixel_dim, eps=1e-6)
         self.mlp = MLP(self.pixel_dim, mlp_ratio=mlp_ratio, drop=0.0)
         self.adaLN_modulation = nn.Sequential(nn.Linear(self.context_dim, 6 * self.pixel_dim * p2, bias=True))
@@ -537,6 +609,8 @@ class MMDiTJointAttention(nn.Module):
         qkv_bias: bool = False,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
+        quant_config=None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
@@ -545,8 +619,23 @@ class MMDiTJointAttention(nn.Module):
         self.head_dim = dim // num_heads
 
         # Separate QKV projections for image (x) and text (y) streams
-        self.qkv_x = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.qkv_y = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkv_x = ReplicatedLinear(
+            dim,
+            dim * 3,
+            bias=qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_x",
+            return_bias=False,
+        )
+
+        self.qkv_y = ReplicatedLinear(
+            dim,
+            dim * 3,
+            bias=qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_y",
+            return_bias=False,
+        )
 
         # Per-stream QK normalization (head-wise)
         self.q_norm_x = RMSNorm(self.head_dim)
@@ -555,8 +644,24 @@ class MMDiTJointAttention(nn.Module):
         self.k_norm_y = RMSNorm(self.head_dim)
 
         # Output projections for each stream
-        self.proj_x = nn.Linear(dim, dim)
-        self.proj_y = nn.Linear(dim, dim)
+        self.proj_x = ReplicatedLinear(
+            dim,
+            dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj_x",
+            return_bias=False,
+        )
+
+        self.proj_y = ReplicatedLinear(
+            dim,
+            dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj_y",
+            return_bias=False,
+        )
+
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop_x = nn.Dropout(proj_drop)
         self.proj_drop_y = nn.Dropout(proj_drop)
@@ -640,7 +745,8 @@ class MMDiTJointAttention(nn.Module):
 
 
 class MMDiTBlockT2I(nn.Module):
-    def __init__(self, hidden_size, groups, mlp_ratio=4.0, ada_ln_modulation_img=None, ada_ln_modulation_txt=None):
+    def __init__(self, hidden_size, groups, mlp_ratio=4.0, ada_ln_modulation_img=None, ada_ln_modulation_txt=None,
+                 quant_config=None, prefix=""):
         super().__init__()
         self.hidden_size = hidden_size
         self.groups = groups
@@ -650,14 +756,20 @@ class MMDiTBlockT2I(nn.Module):
         self.norm_x1 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y1 = RMSNorm(hidden_size, eps=1e-6)
 
-        self.attn = MMDiTJointAttention(hidden_size, num_heads=groups, qkv_bias=False)
+        self.attn = MMDiTJointAttention(
+            hidden_size,
+            num_heads=groups,
+            qkv_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
         self.norm_x2 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y2 = RMSNorm(hidden_size, eps=1e-6)
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        self.mlp_x = FeedForward(hidden_size, mlp_hidden_dim)
-        self.mlp_y = FeedForward(hidden_size, mlp_hidden_dim)
+        self.mlp_x = FeedForward(hidden_size, mlp_hidden_dim, quant_config=quant_config, prefix=f"{prefix}.mlp_x")
+        self.mlp_y = FeedForward(hidden_size, mlp_hidden_dim, quant_config=quant_config, prefix=f"{prefix}.mlp_y")
 
         # Per-stream AdaLN modulation
         self.ada_ln_modulation_img = (
@@ -1116,6 +1228,8 @@ class PixDiT_T2I(nn.Module):
         ed_num_heads: int | None = None,
         ed_hidden_size: int | None = None,
         ed_use_token_shuffle: bool = True,
+        quant_config=None,
+        prefix=""
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -1157,8 +1271,10 @@ class PixDiT_T2I(nn.Module):
                     self.num_groups,
                     ada_ln_modulation_img=self._shared_cond_adaln_img,
                     ada_ln_modulation_txt=self._shared_cond_adaln_txt,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}patch_blocks.{i}"
                 )
-                for _ in range(self.patch_depth)
+                for i in range(self.patch_depth)
             ]
         )
         # Remove AdaLN-based text refinement; PixDiT keeps cross-attn-only text handling
@@ -1180,8 +1296,10 @@ class PixDiT_T2I(nn.Module):
                     rope_mode=self.rope_mode,
                     rope_ref_grid_h=self.rope_ref_grid_h,
                     rope_ref_grid_w=self.rope_ref_grid_w,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}pixel_blocks.{i}",
                 )
-                for _ in range(self.pixel_depth)
+                for i in range(self.pixel_depth)
             ]
         )
 

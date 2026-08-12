@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 from vllm_omni.model_executor.model_loader.weight_utils import (
     download_weights_from_hf_specific,
 )
+from vllm_omni.quantization.component_config import ComponentQuantizationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -343,9 +344,24 @@ class QwenImagePipeline(
             local_files_only=local_files_only,
         ).to(self.device)
         transformer_kwargs = get_transformer_config_kwargs(od_config.tf_model_config, QwenImageTransformer2DModel)
+
+        quantization_config = od_config.quantization_config
+
+        if isinstance(
+                quantization_config,
+                ComponentQuantizationConfig,
+        ):
+            transformer_quantization_config = quantization_config.resolve(
+                "transformer"
+            )
+            pid_quantization_config = quantization_config.resolve("pid")
+        else:
+            transformer_quantization_config = quantization_config
+            pid_quantization_config = None
+
         self.transformer = QwenImageTransformer2DModel(
             od_config=od_config,
-            quant_config=od_config.quantization_config,
+            quant_config=transformer_quantization_config,
             **transformer_kwargs,
         )
 
@@ -369,7 +385,7 @@ class QwenImagePipeline(
             enable_diffusion_pipeline_profiler=self.od_config.enable_diffusion_pipeline_profiler
         )
 
-        self._init_pid_decoder(od_config)
+        self._init_pid_decoder(od_config, quantization_config=pid_quantization_config)
 
     def check_inputs(
         self,
