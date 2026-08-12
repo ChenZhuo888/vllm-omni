@@ -54,6 +54,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
+    cleanup_dist_env_and_memory,
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -198,6 +199,7 @@ def make_vllm_config() -> VllmConfig:
 
     config.model_config = SimpleNamespace(
         dtype=torch.bfloat16,
+        is_moe=False,
     )
 
     return config
@@ -931,4 +933,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        cleanup_dist_env_and_memory(shutdown_ray=False)
