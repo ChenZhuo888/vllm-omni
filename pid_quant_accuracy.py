@@ -647,19 +647,33 @@ def build_test_inputs(
 
 
 def move_test_inputs(
-        inputs: TestInputs,
-        device: torch.device,
-        dtype: torch.dtype,
+    inputs: TestInputs,
+    device: torch.device,
+    dtype: torch.dtype,
 ) -> TestInputs:
-    def move(x: torch.Tensor) -> torch.Tensor:
-        return x.to(device=device, dtype=dtype, non_blocking=False)
+    def move_model_input(x: torch.Tensor) -> torch.Tensor:
+        return x.to(
+            device=device,
+            dtype=dtype,
+            non_blocking=False,
+        )
+
+    def move_sampler_state(x: torch.Tensor) -> torch.Tensor:
+        return x.to(
+            device=device,
+            dtype=torch.float32,
+            non_blocking=False,
+        )
 
     return TestInputs(
-        initial_noise=move(inputs.initial_noise),
-        caption_embs=move(inputs.caption_embs),
-        lq_latent=move(inputs.lq_latent),
-        degrade_sigma=move(inputs.degrade_sigma),
-        sde_noises=[move(x) for x in inputs.sde_noises],
+        initial_noise=move_sampler_state(inputs.initial_noise),
+        caption_embs=move_model_input(inputs.caption_embs),
+        lq_latent=move_model_input(inputs.lq_latent),
+        degrade_sigma=move_model_input(inputs.degrade_sigma),
+        sde_noises=[
+            move_sampler_state(x)
+            for x in inputs.sde_noises
+        ],
     )
 
 
@@ -876,10 +890,13 @@ def collect_quant_metadata(net: PidNet) -> dict:
     method_counts: Counter[str] = Counter()
     weight_dtype_counts: Counter[str] = Counter()
     samples: list[dict] = []
+    linear_base_count = 0
 
     for name, module in net.named_modules():
         if not isinstance(module, LinearBase):
             continue
+
+        linear_base_count += 1
 
         quant_method = getattr(module, "quant_method", None)
         method_name = (
@@ -925,6 +942,7 @@ def collect_quant_metadata(net: PidNet) -> dict:
             samples.append(sample)
 
     return {
+        "linear_base_count": linear_base_count,
         "quant_method_counts": dict(method_counts),
         "weight_dtype_counts": dict(weight_dtype_counts),
         "sample_layers": samples,
@@ -1128,6 +1146,7 @@ def run_case(
         metadata = collect_quant_metadata(net)
         metadata["offline_finalized_layers"] = finalized_layers
 
+        print("vLLM LinearBase layers:", metadata["linear_base_count"])
         print("quant methods:", metadata["quant_method_counts"])
         print("weight dtypes:", metadata["weight_dtype_counts"])
 
