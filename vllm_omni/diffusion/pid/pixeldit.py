@@ -289,7 +289,6 @@ class RotaryAttention(nn.Module):
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
         self.proj = ReplicatedLinear(
             dim,
             dim,
@@ -627,7 +626,6 @@ class MMDiTJointAttention(nn.Module):
             prefix=f"{prefix}.qkv_x",
             return_bias=False,
         )
-
         self.qkv_y = ReplicatedLinear(
             dim,
             dim * 3,
@@ -652,7 +650,6 @@ class MMDiTJointAttention(nn.Module):
             prefix=f"{prefix}.proj_x",
             return_bias=False,
         )
-
         self.proj_y = ReplicatedLinear(
             dim,
             dim,
