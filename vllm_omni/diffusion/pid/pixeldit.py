@@ -570,6 +570,8 @@ class MMDiTJointAttention(nn.Module):
         qkv_bias: bool = False,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
+        quant_config=None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
@@ -578,8 +580,23 @@ class MMDiTJointAttention(nn.Module):
         self.head_dim = dim // num_heads
 
         # Separate QKV projections for image (x) and text (y) streams
-        self.qkv_x = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.qkv_y = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkv_x = ReplicatedLinear(
+            dim,
+            dim * 3,
+            bias=qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_x",
+            return_bias=False,
+        )
+
+        self.qkv_y = ReplicatedLinear(
+            dim,
+            dim * 3,
+            bias=qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_y",
+            return_bias=False,
+        )
 
         # Per-stream QK normalization (head-wise)
         self.q_norm_x = RMSNorm(self.head_dim)
@@ -588,8 +605,24 @@ class MMDiTJointAttention(nn.Module):
         self.k_norm_y = RMSNorm(self.head_dim)
 
         # Output projections for each stream
-        self.proj_x = nn.Linear(dim, dim)
-        self.proj_y = nn.Linear(dim, dim)
+        self.proj_x = ReplicatedLinear(
+            dim,
+            dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj_x",
+            return_bias=False,
+        )
+
+        self.proj_y = ReplicatedLinear(
+            dim,
+            dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj_y",
+            return_bias=False,
+        )
+
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop_x = nn.Dropout(proj_drop)
         self.proj_drop_y = nn.Dropout(proj_drop)
@@ -684,7 +717,13 @@ class MMDiTBlockT2I(nn.Module):
         self.norm_x1 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y1 = RMSNorm(hidden_size, eps=1e-6)
 
-        self.attn = MMDiTJointAttention(hidden_size, num_heads=groups, qkv_bias=False)
+        self.attn = MMDiTJointAttention(
+            hidden_size,
+            num_heads=groups,
+            qkv_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
         self.norm_x2 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y2 = RMSNorm(hidden_size, eps=1e-6)

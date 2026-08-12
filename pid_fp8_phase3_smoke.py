@@ -74,7 +74,10 @@ from vllm_omni.diffusion.pid.config import (
     get_pid_net_config,
 )
 from vllm_omni.diffusion.pid.pid_net import PidNet
-from vllm_omni.diffusion.pid.pixeldit import FeedForward
+from vllm_omni.diffusion.pid.pixeldit import (
+    FeedForward,
+    MMDiTJointAttention,
+)
 from vllm_omni.quantization import build_quant_config
 
 
@@ -257,6 +260,43 @@ def collect_feedforward_fp8_linears(
 
     return fp8_linears
 
+def collect_mmdit_attention_fp8_linears(
+    net: PidNet,
+) -> list[tuple[str, ReplicatedLinear]]:
+    fp8_linears = []
+    attn_count = 0
+
+    for module_name, module in net.named_modules():
+        if not isinstance(module, MMDiTJointAttention):
+            continue
+
+        attn_count += 1
+
+        for attr in ("qkv_x", "qkv_y", "proj_x", "proj_y"):
+            layer = getattr(module, attr)
+
+            assert isinstance(layer, ReplicatedLinear), (
+                f"{module_name}.{attr}: expected ReplicatedLinear, "
+                f"got {type(layer).__name__}"
+            )
+
+            assert isinstance(
+                layer.quant_method,
+                Fp8PerTensorOnlineLinearMethod,
+            ), (
+                f"{module_name}.{attr}: expected "
+                "Fp8PerTensorOnlineLinearMethod, "
+                f"got {type(layer.quant_method).__name__}"
+            )
+
+            fp8_linears.append(
+                (f"{module_name}.{attr}", layer)
+            )
+
+    print(f"      MMDiT attention modules: {attn_count}")
+    print(f"      MMDiT attention FP8 linears: {len(fp8_linears)}")
+
+    return fp8_linears
 
 def verify_preload_state(
         fp8_linears: list[tuple[str, ReplicatedLinear]],
@@ -821,17 +861,20 @@ def main() -> None:
             f"{parameter_count:,}"
         )
 
-        fp8_linears = collect_feedforward_fp8_linears(net)
+        ff_fp8_linears = collect_feedforward_fp8_linears(net)
+        attn_fp8_linears = collect_mmdit_attention_fp8_linears(net)
 
-        # Current PiD architecture should naturally produce 84:
-        # 28 FeedForward modules * 3 linear layers.
-        #
-        # We intentionally derive this rather than hard-code 84 so the
-        # test remains meaningful if PiD architecture config changes.
         print(
             f"      expected from FeedForward graph: "
-            f"{len(fp8_linears)}"
+            f"{len(ff_fp8_linears)}"
         )
+
+        print(
+            f"      expected from MMDiT attention graph: "
+            f"{len(attn_fp8_linears)}"
+        )
+
+        fp8_linears = ff_fp8_linears + attn_fp8_linears
 
         verify_preload_state(fp8_linears)
 
