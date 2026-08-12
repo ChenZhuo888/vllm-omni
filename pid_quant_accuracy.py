@@ -324,6 +324,9 @@ def _make_vllm_config_context(device: torch.device, dtype: torch.dtype):
     cfg.model_config = SimpleNamespace(
         dtype=dtype,
         is_moe=False,
+        hf_text_config=SimpleNamespace(
+            model_type=None,
+        ),
     )
     return set_current_vllm_config(cfg)
 
