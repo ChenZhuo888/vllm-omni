@@ -77,6 +77,7 @@ from vllm_omni.diffusion.pid.pid_net import PidNet
 from vllm_omni.diffusion.pid.pixeldit import (
     FeedForward,
     MMDiTJointAttention,
+    PiTBlock,
 )
 from vllm_omni.quantization import build_quant_config
 
@@ -295,6 +296,52 @@ def collect_mmdit_attention_fp8_linears(
 
     print(f"      MMDiT attention modules: {attn_count}")
     print(f"      MMDiT attention FP8 linears: {len(fp8_linears)}")
+
+    return fp8_linears
+
+def collect_pit_fp8_linears(
+    net: PidNet,
+) -> list[tuple[str, ReplicatedLinear]]:
+    fp8_linears = []
+    pit_count = 0
+
+    for module_name, module in net.named_modules():
+        if not isinstance(module, PiTBlock):
+            continue
+
+        pit_count += 1
+
+        layers = {
+            "compress_to_attn": module.compress_to_attn,
+            "expand_from_attn": module.expand_from_attn,
+            "attn.qkv": module.attn.qkv,
+            "attn.proj": module.attn.proj,
+        }
+
+        for attr, layer in layers.items():
+            assert isinstance(layer, ReplicatedLinear), (
+                f"{module_name}.{attr}: expected ReplicatedLinear, "
+                f"got {type(layer).__name__}"
+            )
+
+            assert isinstance(
+                layer.quant_method,
+                Fp8PerTensorOnlineLinearMethod,
+            ), (
+                f"{module_name}.{attr}: expected "
+                "Fp8PerTensorOnlineLinearMethod, "
+                f"got {type(layer.quant_method).__name__}"
+            )
+
+            fp8_linears.append(
+                (f"{module_name}.{attr}", layer)
+            )
+
+    assert pit_count > 0
+    assert len(fp8_linears) == pit_count * 4
+
+    print(f"      PiT modules: {pit_count}")
+    print(f"      PiT FP8 linears: {len(fp8_linears)}")
 
     return fp8_linears
 
@@ -863,6 +910,7 @@ def main() -> None:
 
         ff_fp8_linears = collect_feedforward_fp8_linears(net)
         attn_fp8_linears = collect_mmdit_attention_fp8_linears(net)
+        pit_fp8_linears = collect_pit_fp8_linears(net)
 
         print(
             f"      expected from FeedForward graph: "
@@ -874,7 +922,12 @@ def main() -> None:
             f"{len(attn_fp8_linears)}"
         )
 
-        fp8_linears = ff_fp8_linears + attn_fp8_linears
+        print(
+            f"      expected from PiT attention graph: "
+            f"{len(pit_fp8_linears)}"
+        )
+
+        fp8_linears = ff_fp8_linears + attn_fp8_linears + pit_fp8_linears
 
         verify_preload_state(fp8_linears)
 

@@ -267,6 +267,8 @@ class RotaryAttention(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         norm_layer: nn.Module = RMSNorm,
+        quant_config=None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
@@ -276,11 +278,26 @@ class RotaryAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkv = ReplicatedLinear(
+            dim,
+            dim * 3,
+            bias=qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv",
+            return_bias=False,
+        )
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
+        self.proj = ReplicatedLinear(
+            dim,
+            dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+            return_bias=False,
+        )
         self.proj_drop = nn.Dropout(proj_drop)
         # Context-parallel group; when set, `forward` runs split-Q / gather-K,V.
         self._cp_group: ProcessGroup | None = None
@@ -474,6 +491,8 @@ class PiTBlock(nn.Module):
         rope_mode: str = "original",
         rope_ref_grid_h: int = 32,
         rope_ref_grid_w: int = 32,
+        quant_config=None,
+        prefix: str = "",
     ):
         super().__init__()
         self.pixel_dim = int(pixel_hidden_size)
@@ -486,10 +505,30 @@ class PiTBlock(nn.Module):
         self.rope_ref_grid_w = rope_ref_grid_w
         assert self.attn_dim % self.num_heads == 0, "pixel attention hidden size must be divisible by pixel num_heads"
         p2 = self.patch_size * self.patch_size
-        self.compress_to_attn = nn.Linear(p2 * self.pixel_dim, self.attn_dim, bias=True)
-        self.expand_from_attn = nn.Linear(self.attn_dim, p2 * self.pixel_dim, bias=True)
+        self.compress_to_attn = ReplicatedLinear(
+            p2 * self.pixel_dim,
+            self.attn_dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.compress_to_attn",
+            return_bias=False,
+        )
+        self.expand_from_attn = ReplicatedLinear(
+            self.attn_dim,
+            p2 * self.pixel_dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.expand_from_attn",
+            return_bias=False,
+        )
         self.norm1 = RMSNorm(self.pixel_dim, eps=1e-6)
-        self.attn = RotaryAttention(self.attn_dim, num_heads=self.num_heads, qkv_bias=False)
+        self.attn = RotaryAttention(
+            self.attn_dim,
+            num_heads=self.num_heads,
+            qkv_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
         self.norm2 = RMSNorm(self.pixel_dim, eps=1e-6)
         self.mlp = MLP(self.pixel_dim, mlp_ratio=mlp_ratio, drop=0.0)
         self.adaLN_modulation = nn.Sequential(nn.Linear(self.context_dim, 6 * self.pixel_dim * p2, bias=True))
@@ -1257,8 +1296,10 @@ class PixDiT_T2I(nn.Module):
                     rope_mode=self.rope_mode,
                     rope_ref_grid_h=self.rope_ref_grid_h,
                     rope_ref_grid_w=self.rope_ref_grid_w,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}pixel_blocks.{i}",
                 )
-                for _ in range(self.pixel_depth)
+                for i in range(self.pixel_depth)
             ]
         )
 
