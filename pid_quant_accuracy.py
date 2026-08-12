@@ -47,7 +47,7 @@ import math
 import os
 import tempfile
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -167,9 +167,9 @@ def parse_args() -> argparse.Namespace:
         metavar=("NAME", "SCHEME", "CHECKPOINT"),
         default=[],
         help=(
-            "Add one serialized/offline FP8 case. SCHEME is one of: "
-            + ", ".join(OFFLINE_FP8_SCHEMES)
-            + ". May be repeated."
+                "Add one serialized/offline FP8 case. SCHEME is one of: "
+                + ", ".join(OFFLINE_FP8_SCHEMES)
+                + ". May be repeated."
         ),
     )
 
@@ -321,7 +321,10 @@ def _make_vllm_config_context(device: torch.device, dtype: torch.dtype):
     cfg = VllmConfig(
         device_config=DeviceConfig(device=device.type),
     )
-    cfg.model_config = SimpleNamespace(dtype=dtype, is_moe=False)
+    cfg.model_config = SimpleNamespace(
+        dtype=dtype,
+        is_moe=False,
+    )
     return set_current_vllm_config(cfg)
 
 
@@ -346,8 +349,8 @@ def _call_initialize_model_parallel(backend: str) -> None:
 
 @contextmanager
 def single_rank_vllm_environment(
-    device: torch.device,
-    dtype: torch.dtype,
+        device: torch.device,
+        dtype: torch.dtype,
 ) -> Iterator[None]:
     """Create rank-0/world-size-1 distributed + model-parallel state."""
 
@@ -427,7 +430,7 @@ def single_rank_vllm_environment(
 
 
 def build_online_per_tensor_config(
-    ignored_layers: list[str],
+        ignored_layers: list[str],
 ):
     """Exact online-FP8 family used by the existing PiD Phase-3 path."""
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
@@ -440,8 +443,8 @@ def build_online_per_tensor_config(
 
 
 def build_online_shorthand_config(
-    shorthand: str,
-    ignored_layers: list[str],
+        shorthand: str,
+        ignored_layers: list[str],
 ):
     """Use current vLLM OnlineQuantizationConfig dispatch for block/channel."""
     from vllm.config.quantization import (
@@ -469,8 +472,8 @@ def build_online_shorthand_config(
 
 
 def build_offline_fp8_config(
-    scheme: str,
-    ignored_layers: list[str],
+        scheme: str,
+        ignored_layers: list[str],
 ):
     """Build vLLM's serialized/offline Fp8Config for a PiD FP8 checkpoint."""
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
@@ -573,10 +576,10 @@ def build_cases(args: argparse.Namespace) -> list[QuantCase]:
 
 
 def build_test_inputs(
-    height: int,
-    width: int,
-    text_length: int,
-    seed: int,
+        height: int,
+        width: int,
+        text_length: int,
+        seed: int,
 ) -> TestInputs:
     """Generate all random tensors ONCE on CPU in float32."""
 
@@ -641,9 +644,9 @@ def build_test_inputs(
 
 
 def move_test_inputs(
-    inputs: TestInputs,
-    device: torch.device,
-    dtype: torch.dtype,
+        inputs: TestInputs,
+        device: torch.device,
+        dtype: torch.dtype,
 ) -> TestInputs:
     def move(x: torch.Tensor) -> torch.Tensor:
         return x.to(device=device, dtype=dtype, non_blocking=False)
@@ -658,9 +661,9 @@ def move_test_inputs(
 
 
 def velocity_to_x0(
-    x_t: torch.Tensor,
-    velocity: torch.Tensor,
-    t: torch.Tensor,
+        x_t: torch.Tensor,
+        velocity: torch.Tensor,
+        t: torch.Tensor,
 ) -> torch.Tensor:
     """Match PiD's x0 = x_t - t * velocity with double intermediate."""
 
@@ -668,15 +671,15 @@ def velocity_to_x0(
     t_broadcast = t.double().view(*shape)
 
     return (
-        x_t.double()
-        - t_broadcast * velocity.double()
+            x_t.double()
+            - t_broadcast * velocity.double()
     ).to(x_t.dtype)
 
 
 @torch.inference_mode()
 def run_deterministic_sampler(
-    net: PidNet,
-    inputs: TestInputs,
+        net: PidNet,
+        inputs: TestInputs,
 ) -> RunOutput:
     """Run PiD's 4-step SDE while injecting pre-generated SDE noise."""
 
@@ -716,8 +719,8 @@ def run_deterministic_sampler(
     sde_noise_index = 0
 
     for step_index, (t_cur, t_next) in enumerate(
-        zip(t_list[:-1], t_list[1:]),
-        start=1,
+            zip(t_list[:-1], t_list[1:]),
+            start=1,
     ):
         t_cur_batch = t_cur.expand(batch_size)
         t_scaled = t_cur_batch * timescale
@@ -759,8 +762,8 @@ def run_deterministic_sampler(
             t_next_broadcast = t_next.reshape(1).expand(shape)
 
             x = (
-                (1.0 - t_next_broadcast) * x0_pred
-                + t_next_broadcast * eps_infer
+                    (1.0 - t_next_broadcast) * x0_pred
+                    + t_next_broadcast * eps_infer
             )
         else:
             x = x0_pred
@@ -796,9 +799,9 @@ def run_deterministic_sampler(
 
 
 def build_model(
-    quant_config: object | None,
-    device: torch.device,
-    dtype: torch.dtype,
+        quant_config: object | None,
+        device: torch.device,
+        dtype: torch.dtype,
 ) -> PidNet:
     """Construct the whole PidNet directly on the execution device.
 
@@ -820,8 +823,8 @@ def build_model(
 
 
 def load_model_checkpoint(
-    net: PidNet,
-    checkpoint: Path,
+        net: PidNet,
+        checkpoint: Path,
 ) -> None:
     wrapper = PidNetWrapper(net)
     load_pid_checkpoint(wrapper, str(checkpoint))
@@ -905,9 +908,9 @@ def collect_quant_metadata(net: PidNet) -> dict:
             }
 
             for scale_name in (
-                "weight_scale",
-                "weight_scale_inv",
-                "input_scale",
+                    "weight_scale",
+                    "weight_scale_inv",
+                    "input_scale",
             ):
                 scale = getattr(module, scale_name, None)
                 if isinstance(scale, torch.Tensor):
@@ -931,8 +934,8 @@ def collect_quant_metadata(net: PidNet) -> dict:
 
 
 def compute_metrics(
-    reference: torch.Tensor,
-    candidate: torch.Tensor,
+        reference: torch.Tensor,
+        candidate: torch.Tensor,
 ) -> ErrorMetrics:
     if reference.shape != candidate.shape:
         raise ValueError(
@@ -982,8 +985,8 @@ def compute_metrics(
 
 
 def compare_to_baseline(
-    baseline: RunOutput,
-    candidate: RunOutput,
+        baseline: RunOutput,
+        candidate: RunOutput,
 ) -> dict:
     if len(baseline.step_states) != len(candidate.step_states):
         raise RuntimeError("Baseline/candidate sampler step count differs")
@@ -1086,10 +1089,10 @@ def json_safe(obj):
 
 
 def run_case(
-    case: QuantCase,
-    cpu_inputs: TestInputs,
-    device: torch.device,
-    dtype: torch.dtype,
+        case: QuantCase,
+        cpu_inputs: TestInputs,
+        device: torch.device,
+        dtype: torch.dtype,
 ) -> tuple[RunOutput, dict]:
     print()
     print("=" * 88)
@@ -1131,10 +1134,22 @@ def run_case(
             dtype=dtype,
         )
 
-        output = run_deterministic_sampler(
-            net,
-            case_inputs,
+        # Match PidInferenceModel production precision semantics:
+        # keep numerically sensitive ops free to stay/promote to fp32, while
+        # Linear/Conv matmuls execute under the requested low precision.
+        autocast_ctx = (
+            torch.autocast(
+                device_type=device.type,
+                dtype=dtype,
+            )
+            if dtype != torch.float32
+            else nullcontext()
         )
+        with autocast_ctx:
+            output = run_deterministic_sampler(
+                net,
+                case_inputs,
+            )
 
         del case_inputs
 
