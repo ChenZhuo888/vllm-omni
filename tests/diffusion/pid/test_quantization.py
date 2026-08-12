@@ -3,7 +3,7 @@
 
 IMPORTANT:
     Run this file from inside the repository's tests/ tree, e.g.
-    tests/diffusion/models/qwen_image/test_pid_quantization.py
+    tests/diffusion/pid/test_quantization.py
 
     It intentionally relies on the repository's own pytest fixtures:
       - default_vllm_config
