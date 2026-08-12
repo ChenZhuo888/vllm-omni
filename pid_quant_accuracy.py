@@ -199,8 +199,20 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help=(
-            "Layer prefix to leave unquantized. May be repeated. "
-            "Applied to built-in online/offline FP8 configs where supported."
+            "Layer-name pattern to leave unquantized. May be repeated. "
+            "Matching semantics are controlled by --ignore-match-mode."
+        ),
+    )
+
+    parser.add_argument(
+        "--ignore-match-mode",
+        choices=("exact", "prefix", "substring"),
+        default="exact",
+        help=(
+            "How --ignore-layer patterns are matched against layer names. "
+            "'exact' matches only the full layer name; "
+            "'prefix' matches a layer or its descendants; "
+            "'substring' matches anywhere in the layer name."
         ),
     )
 
@@ -505,6 +517,27 @@ def build_offline_fp8_config(
 
     raise ValueError(f"Unknown offline FP8 scheme: {scheme}")
 
+
+def layer_name_matches(
+    layer_name: str,
+    pattern: str,
+    match_mode: str,
+) -> bool:
+    if match_mode == "exact":
+        return layer_name == pattern
+
+    if match_mode == "prefix":
+        return (
+            layer_name == pattern
+            or layer_name.startswith(pattern + ".")
+        )
+
+    if match_mode == "substring":
+        return pattern in layer_name
+
+    raise ValueError(
+        f"Unsupported ignore match mode: {match_mode}"
+    )
 
 def build_cases(args: argparse.Namespace) -> list[QuantCase]:
     bf16_checkpoint = args.checkpoint
