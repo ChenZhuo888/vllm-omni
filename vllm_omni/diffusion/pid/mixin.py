@@ -30,7 +30,9 @@ from typing import Any, ClassVar
 import torch
 import torch.distributed as dist
 
+from tests.diffusion.quantization.test_bitsandbytes_config import quant_config
 from vllm_omni.diffusion.pid.decoder import PidDecodeConfig, PidDecoder
+from vllm_omni.quantization.component_config import ComponentQuantizationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +69,16 @@ class PidDecodeMixin:
         if not self.PID_BACKBONE:
             raise RuntimeError(f"{type(self).__name__} must set PID_BACKBONE to use PiD.")
 
+        quantization_config = None
+        if isinstance(od_config.quantization_config, ComponentQuantizationConfig):
+            if "pid" in od_config.quantization_config.component_configs:
+                quantization_config = od_config.quantization_config.resolve("pid")
+
         decoder = PidDecoder(
             config=self._pid_config,
             backbone=self.PID_BACKBONE,
             enforce_eager=bool(getattr(od_config, "enforce_eager", False)),
-            quant_config=od_config.quantization_config,
+            quant_config=quantization_config,
         )
         # Eager load: weights are resident before the first request.
         decoder.load_weights()
